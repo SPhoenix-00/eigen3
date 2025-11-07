@@ -1,0 +1,72 @@
+# Logging Configuration
+
+# Console logging
+console_log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+log_to_console: true
+
+# File logging
+log_to_file: true
+log_file_name: "training.log"
+file_log_level: "DEBUG"
+
+# TensorBoard
+use_tensorboard: true
+tensorboard_log_dir: "${log_dir}/tensorboard/${run_name}"
+
+# Weights & Biases (WandB)
+use_wandb: true
+wandb_project: "eigen3-trading"
+wandb_entity: null  # Set to your WandB username/team
+wandb_run_name: "${run_name}"
+wandb_tags:
+  - "erl"
+  - "trading"
+  - "jax"
+wandb_notes: "JAX-based ERL for stock trading"
+wandb_mode: "online"  # "online", "offline", or "disabled"
+
+# Logging intervals
+log_interval: 1  # Log metrics every N generations
+log_agent_params: false  # Log parameter histograms (can be expensive)
+log_attention_weights: true  # Log attention visualizations
+log_gradients: false  # Log gradient statistics
+
+# Metrics to log
+metrics:
+  # Population metrics
+  - mean_fitness
+  - max_fitness
+  - min_fitness
+  - std_fitness
+
+  # RL metrics
+  - rl_actor_loss
+  - rl_critic_loss
+  - rl_mean_q
+
+  # Episode metrics
+  - episode_return
+  - episode_length
+  - num_wins
+  - num_losses
+  - win_rate
+  - total_gain_pct
+  - num_positions_opened
+
+  # Best agent metrics
+  - best_fitness
+  - best_validation_return
+
+  # Training metrics
+  - generation
+  - total_timesteps
+  - total_episodes
+
+# Visualization
+plot_interval: 50  # Generate plots every N generations
+save_plots: true
+plot_types:
+  - fitness_distribution
+  - learning_curves
+  - episode_returns
+  - attention_heatmaps

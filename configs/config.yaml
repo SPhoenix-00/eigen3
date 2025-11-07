@@ -1,0 +1,30 @@
+# Main Hydra configuration file for Eigen3
+
+defaults:
+  - agent: trading_erl
+  - env: trading
+  - logging: default
+  - _self_
+
+# Random seed
+seed: 42
+
+# Device configuration
+device: "cuda"  # "cuda", "cpu", or "tpu"
+num_devices: 1
+
+# Checkpoint and logging directories
+checkpoint_dir: checkpoints
+log_dir: logs
+data_dir: data
+
+# Experiment tracking
+experiment_name: eigen3_trading
+run_name: ${now:%Y-%m-%d_%H-%M-%S}
+
+# Enable JIT compilation
+enable_jit: true
+
+# Enable multi-device training (pmap)
+enable_pmap: false
+pmap_axis_name: "devices"

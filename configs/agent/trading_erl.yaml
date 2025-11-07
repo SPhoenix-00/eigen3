@@ -1,0 +1,85 @@
+# Trading ERL Agent Configuration
+# Based on Eigen2's ERL parameters with JAX/EvoRL adaptations
+
+# Workflow class (will be implemented)
+workflow_cls: eigen3.workflows.trading_erl_workflow.TradingERLWorkflow
+
+# Population parameters
+pop_size: 16
+num_elites: 6  # 37.5% of population (same as Eigen2)
+tournament_size: 3
+
+# RL agent parameters
+num_rl_agents: 1  # Number of RL agents in population
+rl_updates_per_gen: 32  # Gradient steps per generation
+batch_size: 64
+gradient_accumulation_steps: 2  # Effective batch size: 128
+
+# DDPG hyperparameters
+discount: 0.99
+tau: 0.005  # Soft target update rate
+exploration_noise: 0.1
+policy_noise: 0.2  # For TD3-style delayed policy updates
+clip_policy_noise: 0.5
+actor_update_interval: 2  # Update actor every N critic updates
+
+# Genetic algorithm parameters
+mutation_strength: 0.025  # Gaussian noise std (same as Eigen2)
+mutation_rate: 0.2  # 20% of parameters mutated
+crossover_alpha_min: 0.2
+crossover_alpha_max: 0.8
+
+# Evaluation parameters
+episodes_per_agent: 5  # Multi-slice evaluation
+conservative_k: 2  # Average of K worst episodes for fitness
+
+# RL injection
+rl_injection_interval: 1  # Inject RL agent every N generations
+champion_injection: true  # Inject all-time best validation agent
+
+# Replay buffer
+replay_buffer_size: 100000
+warmup_episodes: 10  # Fill buffer before training
+
+# Network architecture
+actor_network:
+  num_stocks: 108
+  stock_start_idx: 8
+  use_remat: true  # Gradient checkpointing
+
+critic_network:
+  use_attention: false
+  use_remat: true
+
+feature_extractor:
+  num_columns: 669
+  cnn_filters: 32
+  lstm_hidden_size: 128
+  num_lstm_layers: 2
+  chunk_size: 64  # Process columns in chunks
+
+attention_module:
+  embed_dim: 256
+  num_heads: 8
+  dropout_rate: 0.1
+
+# Optimizer
+optimizer:
+  name: adam
+  lr: 0.0003
+  weight_decay: 0.0
+  grad_clip_norm: 1.0
+  eps: 1e-8
+
+# Training
+total_generations: 10000
+eval_interval: 50  # Validate best agent every N generations
+save_interval: 100  # Save checkpoint every N generations
+
+# Loss weights
+loss_weights:
+  actor_loss: 1.0
+  critic_loss: 1.0
+
+# Mixed precision training
+use_mixed_precision: false  # JAX handles precision automatically
