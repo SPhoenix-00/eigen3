@@ -1,8 +1,13 @@
-"""Custom ERL workflows for trading"""
+"""Custom ERL workflows for stock trading"""
 
-# Will be implemented in later steps
-# from eigen3.workflows.trading_erl_workflow import TradingERLWorkflow
+from eigen3.workflows.trading_workflow import (
+    TradingERLWorkflow,
+    TradingWorkflowConfig,
+    create_trading_workflow,
+)
 
 __all__ = [
-    # "TradingERLWorkflow",
+    "TradingERLWorkflow",
+    "TradingWorkflowConfig",
+    "create_trading_workflow",
 ]
