@@ -192,41 +192,39 @@ class TradingAgent(Agent):
         params = agent_state.params
 
         # Extract batch data
-        obs = sample_batch.obs  # [batch, context_days, 669, 5]
+        obs = sample_batch.obs  # [batch, context_days, num_columns, 5]
         actions = sample_batch.actions  # [batch, 108, 2]
         rewards = sample_batch.rewards  # [batch]
-        next_obs = sample_batch.next_obs  # [batch, context_days, 669, 5]
+        next_obs = sample_batch.next_obs  # [batch, context_days, num_columns, 5]
         dones = sample_batch.dones  # [batch]
 
         # ============ Critic Loss ============
-        # Compute target Q-values (no gradient)
-        with jax.lax.stop_gradient:
-            # Get next actions from target actor
-            next_actions, _ = self.actor_network.apply(
-                params.target_actor_params,
-                next_obs,
-                train=False,
-                return_attention_weights=False
-            )
+        # Compute target Q-values (no gradient through targets)
+        next_actions, _ = self.actor_network.apply(
+            params.target_actor_params,
+            next_obs,
+            train=False,
+            return_attention_weights=False
+        )
 
-            # Get target Q-values from target critic
-            target_q = self.critic_network.apply(
-                params.target_critic_params,
-                next_obs,
-                next_actions,
-                train=False
-            )
+        target_q = self.critic_network.apply(
+            params.target_critic_params,
+            next_obs,
+            next_actions,
+            train=False
+        )
 
-            # For twin critics (TD3-style), take minimum
-            if target_q.shape[-1] == 2:
-                target_q = jnp.min(target_q, axis=-1, keepdims=True)
+        # For twin critics (TD3-style), take minimum
+        if target_q.shape[-1] == 2:
+            target_q = jnp.min(target_q, axis=-1, keepdims=True)
 
-            # Compute TD target: r + gamma * (1 - done) * Q_target(s', a')
-            # Reshape rewards and dones to match target_q shape
-            rewards = rewards.reshape(-1, 1)
-            dones = dones.reshape(-1, 1)
+        # Compute TD target: r + gamma * (1 - done) * Q_target(s', a')
+        rewards = rewards.reshape(-1, 1)
+        dones = dones.reshape(-1, 1)
 
-            td_target = rewards + self.discount * (1.0 - dones) * target_q
+        td_target = jax.lax.stop_gradient(
+            rewards + self.discount * (1.0 - dones) * target_q
+        )
 
         # Compute current Q-values
         current_q = self.critic_network.apply(
@@ -335,7 +333,7 @@ def test_trading_agent():
     # Create dummy spaces
     from evorl.envs import Box
 
-    obs_space = Box(low=-jnp.inf, high=jnp.inf, shape=(504, 669, 5))
+    obs_space = Box(low=-jnp.inf, high=jnp.inf, shape=(151, 117, 5))
     action_space = Box(low=0.0, high=jnp.inf, shape=(108, 2))
 
     # Initialize agent
@@ -346,7 +344,7 @@ def test_trading_agent():
 
     # Test compute_actions (with noise)
     batch_size = 4
-    obs = random.normal(key, (batch_size, 504, 669, 5))
+    obs = random.normal(key, (batch_size, 151, 117, 5))
     sample_batch = SampleBatch(obs=obs)
 
     key, action_key = random.split(key)
@@ -361,7 +359,7 @@ def test_trading_agent():
     assert eval_actions.shape == (batch_size, 108, 2)
 
     # Test loss computation
-    next_obs = random.normal(key, (batch_size, 504, 669, 5))
+    next_obs = random.normal(key, (batch_size, 151, 117, 5))
     rewards = random.normal(key, (batch_size,))
     dones = jnp.zeros((batch_size,))
 

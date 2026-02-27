@@ -29,8 +29,8 @@ class Critic(nn.Module):
     action_dim: int = 2
     critic_hidden_dims: Tuple[int, int] = (256, 128)
 
-    # Feature extraction parameters
-    num_columns: int = 669
+    # Feature extraction parameters (Eigen2: 117 columns)
+    num_columns: int = 117
     num_features: int = 5
 
     # Attention parameters
@@ -213,10 +213,10 @@ def test_critic():
 
     key = random.PRNGKey(0)
     batch_size = 2
-    context_days = 504
+    context_days = 151
 
-    # Create inputs
-    state = random.normal(key, (batch_size, context_days, 669, 5))
+    # Create inputs (Eigen2: 117 columns, 151 context days)
+    state = random.normal(key, (batch_size, context_days, 117, 5))
     action = random.normal(key, (batch_size, 108, 2))
 
     # Test single Critic

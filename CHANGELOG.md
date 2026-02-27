@@ -34,6 +34,14 @@ All notable changes to Eigen3 are documented here.
 ### Fixed
 
 - Observation normalization in `TradingEnv._get_observation`: support for 2D `norm_stats` (shape `(num_columns, num_features)`).
+- **Workflow (`trading_workflow.py`)**: `_crossover` referenced wrong attribute names (`actor_target_params` → `target_actor_params`, `critic_target_params` → `target_critic_params`).
+- **Workflow (`trading_workflow.py`)**: `_initialize_population` used hardcoded stale dimensions `(504, 669)`; now initializes via `self.env.obs_space` / `self.env.action_space`.
+- **Workflow (`trading_workflow.py`)**: `compute_actions`, `evaluate_actions`, and `loss` were called with raw `TradingNetworkParams` instead of `AgentState` wrapper; raw dicts replaced with `SampleBatch`.
+- **Agent (`trading_agent.py`)**: `jax.lax.stop_gradient` was used as a context manager (invalid); replaced with `jax.lax.stop_gradient(td_target)` function call.
+- **Critic (`critic.py`)**: `Critic.num_columns` default was still `669`; changed to `117` to match `DoubleCritic` and Actor.
+- **Train (`scripts/train.py`)**: 10 environment parameters from YAML config were silently ignored; now all forwarded to `TradingEnv` constructor.
+- **Data (`data_loader.py`)**: `StockDataLoader` methods crashed with `TypeError` when `normalize=False` because `norm_stats` was `None`; added identity fallback.
+- **Tests**: All inline `test_*()` functions updated from stale `(504, 669)` to Eigen2-aligned `(151, 117)` dimensions.
 
 ---
 

@@ -56,8 +56,18 @@ def main(cfg: DictConfig) -> None:
         settlement_period_days=_env_cfg("settlement_period_days", 30),
         min_holding_period=_env_cfg("min_holding_period", 20),
         max_holding_days=_env_cfg("max_holding_period", 30),
+        max_positions=_env_cfg("max_positions", 10),
+        inaction_penalty=_env_cfg("inaction_penalty", 0.0),
+        coefficient_threshold=_env_cfg("coefficient_threshold", 1.0),
+        min_sale_target=_env_cfg("min_sale_target", 10.0),
+        max_sale_target=_env_cfg("max_sale_target", 50.0),
         investable_start_col=_env_cfg("investable_start_col", 9),
         num_investable_stocks=_env_cfg("num_investable_stocks", 108),
+        loss_penalty_multiplier=_env_cfg("loss_penalty_multiplier", 1.0),
+        hurdle_rate=_env_cfg("hurdle_rate", 0.006),
+        conviction_scaling_power=_env_cfg("conviction_scaling_power", 1.25),
+        forced_exit_penalty_pct=_env_cfg("forced_exit_penalty_pct", 0.01),
+        observation_noise_std=_env_cfg("observation_noise_std", 0.01),
     )
 
     # Workflow: instantiate TradingERLWorkflow with env, agent, evaluator, config when ready

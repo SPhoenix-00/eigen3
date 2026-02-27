@@ -113,9 +113,14 @@ This document lists changes in Eigen2 since Eigen3 was branched, and the corresp
 
 ## 7. Summary checklist
 
-- [ ] Data: 117 columns, 151 context, identity norm, three-tier split, dates.
+- [x] Data: 117 columns, 151 context, identity norm, three-tier split, dates.
 - [ ] Env: dates, trading_end_idx, min/max holding, hurdle, conviction, forced exit, observation noise, gauntlet/consistency/maverick, episode summary (peak capital, ROI).
-- [ ] Models: Instance norm first in FeatureExtractor; Actor self-attention, head init, coefficient clamp 100; Critic mean pool; attention dropout.
+  - [x] Core: min/max holding, hurdle, conviction, forced exit, observation noise.
+  - [ ] Remaining: dates array, trading_end_idx, gauntlet/consistency/maverick modes, episode summary (peak capital, ROI).
+- [x] Models: Instance norm first in FeatureExtractor; Actor self-attention, head init, coefficient clamp 100; Critic mean pool; attention dropout.
 - [ ] Agent: Noise decay, coefficient clip 100, get_stats.
-- [ ] Config: All above constants in YAML.
-- [ ] Scripts: train.py wired end-to-end.
+  - [x] Coefficient clip 100 after noise.
+  - [ ] Remaining: Noise decay (NOISE_DECAY 0.99995, MIN_NOISE 0.01), get_stats (update_count, noise_scale, avg losses).
+- [x] Config: All above constants in YAML.
+- [x] Scripts: train.py wired end-to-end (data + env + all config params forwarded).
+- [x] Bug fixes: workflow attribute names, stop_gradient, AgentState wrapping, Critic default, norm_stats None guard, stale 669/504 dimensions.

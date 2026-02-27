@@ -191,12 +191,12 @@ class Actor(nn.Module):
 
         # Extract features from all columns
         features = self.feature_extractor(state, train=train)
-        # [batch, 669, lstm_output_size]
+        # [batch, num_columns, lstm_output_size]
 
         # Apply cross-attention if enabled
         attention_weights = None
         if self.attention is not None:
-            # Cross-attention: single query attends to all 669 features
+            # Cross-attention: single query attends to all column features
             if train and self.use_remat:
                 global_context, attention_weights = remat(
                     lambda x: self.attention(x, train=train, return_attention_weights=True)
@@ -206,9 +206,9 @@ class Actor(nn.Module):
                     features, train=train, return_attention_weights=True
                 )
             # global_context: [batch, 1, lstm_output_size]
-            # attention_weights: [batch, 1, 669]
+            # attention_weights: [batch, 1, num_columns]
 
-            # Squeeze attention weights: [batch, 669]
+            # Squeeze attention weights: [batch, num_columns]
             if attention_weights is not None:
                 attention_weights = jnp.squeeze(attention_weights, axis=1)
 
@@ -281,10 +281,10 @@ def test_actor():
 
     key = random.PRNGKey(0)
     batch_size = 2
-    context_days = 504
+    context_days = 151
 
-    # Create input
-    state = random.normal(key, (batch_size, context_days, 669, 5))
+    # Create input (Eigen2: 117 columns, 151 context days, 5 features)
+    state = random.normal(key, (batch_size, context_days, 117, 5))
 
     # Create Actor
     actor = Actor(use_remat=False)  # Disable remat for testing
@@ -319,7 +319,7 @@ def test_actor():
         params, state, train=False, return_attention_weights=True
     )
     assert attn_weights is not None
-    assert attn_weights.shape == (batch_size, 669)
+    assert attn_weights.shape == (batch_size, 117)
     print(f"✓ Attention weights shape: {attn_weights.shape}")
 
     # Test with gradient checkpointing

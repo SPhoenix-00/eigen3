@@ -275,9 +275,9 @@ def test_feature_extractor():
     """Test the FeatureExtractor implementation"""
     import jax.random as random
 
-    # Create model
+    # Create model (Eigen2: 117 columns, 151 context days)
     model = FeatureExtractor(
-        num_columns=669,
+        num_columns=117,
         num_features=5,
         cnn_filters=32,
         lstm_hidden_size=128,
@@ -289,8 +289,8 @@ def test_feature_extractor():
     # Create dummy input
     key = random.PRNGKey(0)
     batch_size = 2
-    context_days = 504
-    x = random.normal(key, (batch_size, context_days, 669, 5))
+    context_days = 151
+    x = random.normal(key, (batch_size, context_days, 117, 5))
 
     # Initialize parameters
     params = model.init(key, x, train=False)
@@ -300,14 +300,14 @@ def test_feature_extractor():
 
     print(f"Input shape: {x.shape}")
     print(f"Output shape: {output.shape}")
-    print(f"Expected output shape: ({batch_size}, 669, 256)")
+    print(f"Expected output shape: ({batch_size}, 117, 256)")
 
-    assert output.shape == (batch_size, 669, 256), f"Output shape mismatch: {output.shape}"
+    assert output.shape == (batch_size, 117, 256), f"Output shape mismatch: {output.shape}"
     print("✓ FeatureExtractor test passed!")
 
     # Test with gradient checkpointing
     model_remat = FeatureExtractor(
-        num_columns=669,
+        num_columns=117,
         num_features=5,
         use_remat=True
     )

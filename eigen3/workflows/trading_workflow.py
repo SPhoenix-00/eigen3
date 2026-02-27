@@ -22,6 +22,7 @@ from evorl.envs import Env
 from evorl.agents import Agent
 from evorl.evaluators import Evaluator
 
+from evorl.agent import AgentState
 from eigen3.agents import TradingNetworkParams
 
 
@@ -113,16 +114,13 @@ class TradingERLWorkflow(Workflow):
         for i in range(self.config.population_size):
             key, subkey = random.split(key)
 
-            # Create dummy inputs for initialization
-            dummy_obs = jnp.zeros((1, 504, 669, 5))  # [batch, context_days, columns, features]
-            dummy_action = jnp.zeros((1, 108, 2))  # [batch, investable_stocks, 2]
-
-            # Initialize agent parameters
-            agent_params = self.agent.init(
+            # Initialize agent via the EvoRL Agent interface
+            agent_state = self.agent.init(
+                obs_space=self.env.obs_space,
+                action_space=self.env.action_space,
                 key=subkey,
-                sample_obs=dummy_obs,
-                sample_action=dummy_action,
             )
+            agent_params = agent_state.params
 
             population.append(agent_params)
 
@@ -198,8 +196,8 @@ class TradingERLWorkflow(Workflow):
         )
 
         # Copy target networks from parent1 (will be updated during training)
-        child_actor_target = parent1.actor_target_params
-        child_critic_target = parent1.critic_target_params
+        child_actor_target = parent1.target_actor_params
+        child_critic_target = parent1.target_critic_params
 
         return TradingNetworkParams(
             actor_params=child_actor,
@@ -282,8 +280,8 @@ class TradingERLWorkflow(Workflow):
 
             # Compute action (with exploration noise during warmup/training)
             actions, policy_info = self.agent.compute_actions(
-                agent_state=agent_params,
-                sample_batch={'obs': obs[None, ...]},  # Add batch dim
+                agent_state=AgentState(params=agent_params),
+                sample_batch=SampleBatch(obs=obs[None, ...]),
                 key=action_key,
             )
             action = actions[0]  # Remove batch dim
@@ -356,9 +354,16 @@ class TradingERLWorkflow(Workflow):
 
             # Compute losses and gradients
             key, loss_key = random.split(key)
+            sample_batch = SampleBatch(
+                obs=batch['obs'],
+                actions=batch['action'],
+                rewards=batch['reward'],
+                next_obs=batch['next_obs'],
+                dones=batch['done'],
+            )
             losses = self.agent.loss(
-                agent_state=agent_params,
-                sample_batch=batch,
+                agent_state=AgentState(params=agent_params),
+                sample_batch=sample_batch,
                 key=loss_key,
             )
 
@@ -411,8 +416,8 @@ class TradingERLWorkflow(Workflow):
                 # Get deterministic action (no exploration noise)
                 key, action_key = random.split(key)
                 actions, _ = self.agent.evaluate_actions(
-                    agent_state=agent_params,
-                    sample_batch={'obs': env_state.obs[None, ...]},
+                    agent_state=AgentState(params=agent_params),
+                    sample_batch=SampleBatch(obs=env_state.obs[None, ...]),
                     key=action_key,
                 )
                 action = actions[0]

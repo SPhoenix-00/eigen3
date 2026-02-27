@@ -148,6 +148,11 @@ class StockDataLoader:
         # Compute normalization statistics
         if self.config.normalize:
             self._compute_normalization_stats()
+        else:
+            self.norm_stats = {
+                'mean': np.zeros(self.config.num_features_obs),
+                'std': np.ones(self.config.num_features_obs),
+            }
 
         # Split train/val
         self._split_train_val()
@@ -248,6 +253,11 @@ class StockDataLoader:
         # Compute normalization
         if self.config.normalize:
             self._compute_normalization_stats()
+        else:
+            self.norm_stats = {
+                'mean': np.zeros(self.config.num_features_obs),
+                'std': np.ones(self.config.num_features_obs),
+            }
 
         # Split train/val
         self._split_train_val()

@@ -253,7 +253,7 @@ def test_attention():
 
     key = random.PRNGKey(0)
     batch_size = 4
-    num_columns = 669
+    num_columns = 117
     embed_dim = 256
 
     # Test input
