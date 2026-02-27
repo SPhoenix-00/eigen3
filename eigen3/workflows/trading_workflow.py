@@ -17,12 +17,10 @@ from flax.core.frozen_dict import FrozenDict
 
 from evorl.workflows import Workflow
 from evorl.types import PyTreeData
-from evorl.utils.sample_batch import SampleBatch
+from evorl.sample_batch import SampleBatch
 from evorl.envs import Env
-from evorl.agents import Agent
+from evorl.agent import Agent, AgentState
 from evorl.evaluators import Evaluator
-
-from evorl.agent import AgentState
 from eigen3.agents import TradingNetworkParams
 
 

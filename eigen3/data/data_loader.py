@@ -549,6 +549,7 @@ def load_eigen2_data(
 def load_trading_data(
     filepath: str,
     use_identity_norm: bool = True,
+    column_index: Optional[int] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:
     """Load trading data for Eigen3 (Eigen2-compatible schema).
 
@@ -560,13 +561,29 @@ def load_trading_data(
     Args:
         filepath: Path to data directory (with data_array.npy, data_array_full.npy)
         use_identity_norm: If True, use identity norm (Eigen2 default)
+        column_index: If set, slice to single column (for mono/single-stock mode).
+            Result shapes: [T, 1, 5], [T, 1, 9].
 
     Returns:
         Tuple of (data_obs, data_full, norm_stats)
     """
     path = Path(filepath)
     if path.is_dir():
-        return load_eigen2_data(str(path), use_identity_norm)
-    if path.suffix == '.npy' and path.parent.exists():
-        return load_eigen2_data(str(path.parent), use_identity_norm)
-    raise FileNotFoundError(f"Unsupported path or missing data: {filepath}")
+        data_obs, data_full, norm_stats = load_eigen2_data(str(path), use_identity_norm)
+    elif path.suffix == '.npy' and path.parent.exists():
+        data_obs, data_full, norm_stats = load_eigen2_data(str(path.parent), use_identity_norm)
+    else:
+        raise FileNotFoundError(f"Unsupported path or missing data: {filepath}")
+
+    if column_index is not None:
+        data_obs = data_obs[:, column_index : column_index + 1, :]
+        data_full = data_full[:, column_index : column_index + 1, :]
+        if 'mean' in norm_stats and norm_stats['mean'].ndim >= 2:
+            norm_stats = {
+                'mean': norm_stats['mean'][column_index : column_index + 1, :],
+                'std': norm_stats['std'][column_index : column_index + 1, :],
+            }
+        elif 'mean' in norm_stats and norm_stats['mean'].ndim == 1:
+            norm_stats = norm_stats  # Keep as-is for 1D stats
+
+    return data_obs, data_full, norm_stats

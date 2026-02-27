@@ -361,6 +361,13 @@ class TradingEnv(Env):
                 # Days held (Eigen2: MIN_HOLDING_PERIOD=20, MAX_HOLDING_PERIOD=30)
                 days_held = env_state.current_step - entry_step
 
+                # Mono: Sell only after 20 trading days since last buy (for this stock)
+                # last_buy_step = max entry_step over all active positions in this stock
+                same_stock_active = (positions[:, 0] == stock_idx) & (positions[:, 5] > 0.5)
+                last_buy_step = jnp.max(jnp.where(same_stock_active, positions[:, 1], -1))
+                days_since_last_buy = env_state.current_step - last_buy_step
+                can_sell_window = days_since_last_buy >= self.min_holding_period
+
                 # Get current stock data
                 actual_col_idx = self.investable_start_col + stock_idx
                 current_data = self.data_array_full[env_state.current_step, actual_col_idx]
@@ -370,9 +377,8 @@ class TradingEnv(Env):
                 close_price = current_data[1]  # Close price
                 is_valid = jnp.isfinite(close_price)
 
-                # Eigen2: Cannot sell before min_holding_period; can sell when target hit in [min, max); force at max
+                # Cannot sell before min_holding_period; can sell when target hit in [min, max); force at max
                 target_hit = day_high >= target_price
-                can_sell_window = days_held >= self.min_holding_period
                 max_holding_reached = days_held >= self.max_holding_days
                 should_exit = (~is_valid) | (can_sell_window & (target_hit | max_holding_reached))
                 exit_due_to_max_holding = should_exit & max_holding_reached & ~target_hit
@@ -442,7 +448,7 @@ class TradingEnv(Env):
             env_state.num_wins + jnp.sum(wins),
             env_state.num_losses + jnp.sum(losses),
             env_state.total_gain_pct + jnp.sum(gains),
-            env_state.num_trades + jnp.sum(jax.lax.select(rewards != 0, 1, 0))
+            env_state.num_trades + jnp.sum(jnp.where(rewards != 0, 1, 0))
         )
 
     def _process_action(
@@ -479,10 +485,7 @@ class TradingEnv(Env):
         # Check if position available
         position_available = env_state.num_active_positions < self.max_positions
 
-        # Check if stock already has a position
-        has_position = jnp.any(
-            (positions[:, 0] == best_stock_idx) & (positions[:, 5] > 0.5)
-        )
+        # Mono: Allow buying more even when holding (removed has_position check)
 
         # Get stock data
         actual_col_idx = self.investable_start_col + best_stock_idx
@@ -491,7 +494,7 @@ class TradingEnv(Env):
         data_valid = jnp.isfinite(entry_price) & (entry_price > 0)
 
         # Can open position?
-        can_open = valid_coeff & position_available & ~has_position & data_valid
+        can_open = valid_coeff & position_available & data_valid
 
         def open_position_branch():
             """Open a new position"""

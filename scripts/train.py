@@ -25,15 +25,20 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"Setting random seed: {cfg.seed}")
     key = jax.random.PRNGKey(cfg.seed)
 
-    # Load data (Eigen2-compatible schema: 117 cols, identity norm)
+    # Load data (Eigen2-compatible schema; mono: single column)
     data_path = OmegaConf.select(cfg, "env.data_path", default="data/raw")
     path = Path(data_path)
+    column_index = OmegaConf.select(cfg, "env.column_index", default=None)
     if path.is_dir() and (path / "data_array.npy").exists():
         logger.info(f"Loading data from: {data_path}")
-        data_array, data_array_full, norm_stats = load_trading_data(str(path))
+        load_kwargs = {}
+        if column_index is not None:
+            load_kwargs["column_index"] = int(column_index)
+            logger.info(f"Mono mode: using column_index={column_index}")
+        data_array, data_array_full, norm_stats = load_trading_data(str(path), **load_kwargs)
     else:
-        logger.info("Using synthetic data (Eigen2 dimensions: 117 columns)")
         num_cols = OmegaConf.select(cfg, "env.num_columns", default=117)
+        logger.info(f"Using synthetic data ({num_cols} columns)")
         data_array, data_array_full, norm_stats = create_synthetic_data(
             num_days=2000,
             num_columns=num_cols,
