@@ -20,9 +20,10 @@ Eigen3 combines Deep Reinforcement Learning (DDPG) with Evolutionary Algorithms 
 - **Critic**: Value network (twin Q-functions for TD3-style training)
 
 ### Environment
-- **TradingEnv**: JAX-native stock trading simulator
-- 669 stock columns (108 investable)
-- 504-day context windows
+- **TradingEnv**: JAX-native stock trading simulator (Eigen2-aligned)
+- 117 stock columns (108 investable; skinny dataset)
+- 151-day context windows
+- Min/max holding periods (20–30 days), hurdle and conviction-based rewards
 - Position management with exit conditions
 
 ### Training
@@ -91,11 +92,17 @@ pip install -e ".[dev]"
 
 ### 1. Prepare Data
 
-```python
-from eigen3.data.loader import load_trading_data
+Data uses the Eigen2-compatible schema (117 columns, 5 observation features, 9 full features). Load from a directory containing `data_array.npy` and `data_array_full.npy`, or use synthetic data:
 
-data_array, data_array_full, norm_stats = load_trading_data(
-    "data/raw/stock_data.pkl"
+```python
+from eigen3.data import load_trading_data, create_synthetic_data
+
+# From Eigen2-exported directory
+data_array, data_array_full, norm_stats = load_trading_data("data/raw")
+
+# Or synthetic (117 columns, identity norm)
+data_array, data_array_full, norm_stats = create_synthetic_data(
+    num_days=2000, num_columns=117, seed=42
 )
 ```
 
@@ -185,7 +192,7 @@ flake8 eigen3/ tests/ scripts/
 
 ## Migration from Eigen2
 
-This project is a complete rewrite of Eigen2 (PyTorch-based) to JAX. Key differences:
+This project is a complete rewrite of Eigen2 (PyTorch-based) to JAX. **Eigen3 has been synced with Eigen2** (as of 2025-02-27); see [EIGEN2_DELTA.md](EIGEN2_DELTA.md) for a summary of ported behavior and constants (117-column skinny dataset, 151-day context, holding periods, hurdle/conviction rewards, etc.). Key differences:
 
 | Aspect | Eigen2 (PyTorch) | Eigen3 (JAX) |
 |--------|------------------|--------------|
@@ -196,7 +203,7 @@ This project is a complete rewrite of Eigen2 (PyTorch-based) to JAX. Key differe
 | Optimization | torch.optim | Optax |
 | Vectorization | Manual loops | jax.vmap |
 
-See [CONVERSION_PLAN.md](CONVERSION_PLAN.md) for detailed migration strategy.
+See [CONVERSION_PLAN.md](CONVERSION_PLAN.md) for the original migration strategy and [EIGEN2_DELTA.md](EIGEN2_DELTA.md) for the sync checklist.
 
 ## Performance
 

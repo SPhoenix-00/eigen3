@@ -5,6 +5,7 @@ from eigen3.data.data_loader import (
     DataConfig,
     create_synthetic_data,
     load_eigen2_data,
+    load_trading_data,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "DataConfig",
     "create_synthetic_data",
     "load_eigen2_data",
+    "load_trading_data",
 ]

@@ -18,7 +18,7 @@ class AttentionModule(nn.Module):
     """Multi-head attention to learn which stocks/indicators matter
 
     Supports both self-attention and cross-attention modes.
-    Matches PyTorch implementation from eigen2/models/networks.py:136-243
+    Synced with Eigen2. Original: eigen2/models/networks.py:136-243
     """
     embed_dim: int = 256
     num_heads: int = 8

@@ -20,23 +20,23 @@ from eigen3.models.attention import CrossAttentionModule
 
 
 class Actor(nn.Module):
-    """Actor network: outputs actions [coefficient, sale_target] for each stock
+    """Actor network: outputs actions [coefficient, sale_target] for each stock (Eigen2-aligned).
 
-    Uses cross-attention to determine feature importance across all 669 columns.
-    Matches PyTorch implementation from eigen2/models/networks.py:245-451
+    Uses cross-attention (or self-attention) for feature importance. Eigen2: self-attention,
+    investable slice 9:117, coefficient ReLU then clamp [0, 100], sale target clip [10, 50].
     """
-    # Architecture parameters
+    # Architecture parameters (Eigen2: INVESTABLE_START_COL=9, 108 stocks)
     num_investable_stocks: int = 108
-    investable_start_col: int = 8
-    investable_end_col: int = 115  # Inclusive
+    investable_start_col: int = 9
+    investable_end_col: int = 116  # Inclusive (slice 9:117 = 108 columns)
     actor_hidden_dims: Tuple[int, int, int] = (256, 128, 64)
 
-    # Sale target range
+    # Sale target range (Eigen2: MIN/MAX_SALE_TARGET)
     min_sale_target: float = 10.0
     max_sale_target: float = 50.0
 
-    # Feature extraction parameters
-    num_columns: int = 669
+    # Feature extraction parameters (Eigen2: 117 columns)
+    num_columns: int = 117
     num_features: int = 5
 
     # Attention parameters
@@ -79,13 +79,24 @@ class Actor(nn.Module):
         # Combined dimension
         combined_dim = self.actor_hidden_dims[1] * 2  # Investable + context
 
-        # Coefficient head
+        # Coefficient head (Eigen2: init bias 0.5 to avoid dead ReLU)
         self.coeff_fc1 = nn.Dense(self.actor_hidden_dims[2], name='coeff_fc1')
-        self.coeff_fc2 = nn.Dense(1, name='coeff_fc2')
+        self.coeff_fc2 = nn.Dense(
+            1,
+            name='coeff_fc2',
+            kernel_init=nn.initializers.lecun_normal(),
+            bias_init=nn.initializers.constant(0.5),
+        )
 
-        # Sale target head
+        # Sale target head (Eigen2: no sigmoid, init bias at center of [10, 50])
+        center_sale = (self.min_sale_target + self.max_sale_target) / 2.0
         self.sale_fc1 = nn.Dense(self.actor_hidden_dims[2], name='sale_fc1')
-        self.sale_fc2 = nn.Dense(1, name='sale_fc2')
+        self.sale_fc2 = nn.Dense(
+            1,
+            name='sale_fc2',
+            kernel_init=nn.initializers.lecun_normal(),
+            bias_init=nn.initializers.constant(center_sale),
+        )
 
     def _process_investable(self, investable_features: chex.Array, train: bool) -> chex.Array:
         """Process investable stocks (for gradient checkpointing)
@@ -136,42 +147,26 @@ class Actor(nn.Module):
         return x
 
     def _process_sale_target_head(self, combined: chex.Array, train: bool) -> chex.Array:
-        """Process sale target head (for gradient checkpointing)
+        """Process sale target head (Eigen2: no sigmoid, clip in __call__).
 
         Args:
             combined: [batch, 108, combined_dim]
             train: Whether in training mode
 
         Returns:
-            Raw sale targets [batch, 108] in range [0, 1]
+            Raw sale targets [batch, 108] (clipped to [min, max] in __call__)
         """
         x = self.sale_fc1(combined)
         x = nn.relu(x)
         x = nn.Dropout(self.dropout_rate, deterministic=not train)(x)
         x = self.sale_fc2(x)
-        x = nn.sigmoid(x)  # [0, 1]
         x = jnp.squeeze(x, axis=-1)  # [batch, 108]
         return x
 
     def _apply_coefficient_activation(self, raw: chex.Array) -> chex.Array:
-        """Apply activation to ensure coefficient >= 1 or ~0
-
-        Uses smooth activation for better gradient flow during training.
-        Matches PyTorch implementation.
-
-        Args:
-            raw: Raw output from network [batch, 108]
-
-        Returns:
-            Activated coefficients [batch, 108]
-        """
-        # Smooth activation for better training
-        # Negative values -> ~0, Positive values -> >= 1
-        coefficients = jnp.where(
-            raw > 0,
-            jnp.exp(raw * 0.5) + 0.5,  # >= 1 for positive
-            nn.sigmoid(raw * 2.0) * 0.1  # Nearly 0 for negative
-        )
+        """Apply activation: ReLU then clamp [0, 100] (Eigen2: align training with inference)."""
+        coefficients = nn.relu(raw)
+        coefficients = jnp.clip(coefficients, 0.0, 100.0)
         return coefficients
 
     @nn.compact
@@ -190,7 +185,7 @@ class Actor(nn.Module):
 
         Returns:
             actions: [batch, 108, 2] with [coefficient, sale_target] per stock
-            attention_weights: [batch, 669] or None
+            attention_weights: [batch, num_columns] or None
         """
         batch_size = state.shape[0]
 
@@ -239,8 +234,7 @@ class Actor(nn.Module):
 
             context_processed = jnp.expand_dims(context_processed, axis=1)  # [batch, 1, actor_hidden_dims[1]]
 
-        # Extract investable stock features
-        # Columns 8-115 (inclusive) = 108 stocks
+        # Extract investable stock features (Eigen2: columns 9-116 inclusive = 108 stocks)
         investable_features = features[:, self.investable_start_col:self.investable_end_col+1, :]
         # [batch, 108, lstm_output_size]
 
@@ -267,13 +261,9 @@ class Actor(nn.Module):
             raw_coefficients = self._process_coefficient_head(combined, train)
             raw_sale_targets = self._process_sale_target_head(combined, train)
 
-        # Apply activations
-        # Coefficient: >= 1 or ~0
+        # Apply activations (Eigen2: coefficient ReLU+clamp [0,100]; sale target clip [10,50])
         coefficients = self._apply_coefficient_activation(raw_coefficients)
-
-        # Sale target: scale from [0, 1] to [min_sale_target, max_sale_target]
-        sale_targets = (self.min_sale_target +
-                       raw_sale_targets * (self.max_sale_target - self.min_sale_target))
+        sale_targets = jnp.clip(raw_sale_targets, self.min_sale_target, self.max_sale_target)
 
         # Stack into action tensor
         actions = jnp.stack([coefficients, sale_targets], axis=-1)

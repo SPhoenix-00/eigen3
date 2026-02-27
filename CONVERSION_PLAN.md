@@ -8,6 +8,8 @@ This document outlines the complete strategy for converting Eigen2 (PyTorch-base
 **Target Project:** `C:\Users\antoi\Documents\GitHub\eigen3`
 **EvoRL Framework:** `C:\Users\antoi\Documents\GitHub\eigen3\evorl`
 
+**Sync status (2025-02-27):** Eigen3 has been brought up to speed with Eigen2 changes. See [EIGEN2_DELTA.md](EIGEN2_DELTA.md) for the delta (117-column skinny dataset, 151-day context, instance norm, holding periods, hurdle/conviction rewards, coefficient clamp 100, etc.) and which Eigen3 files were updated.
+
 ---
 
 ## Phase 1: The Great JAX Conversion

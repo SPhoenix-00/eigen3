@@ -93,17 +93,18 @@ class BiLSTM(nn.Module):
 
 
 class FeatureExtractor(nn.Module):
-    """Extract features from multi-column time-series data
+    """Extract features from multi-column time-series data (Eigen2-aligned).
 
     Architecture:
-    1. 1D CNN across features (per column)
-    2. Bidirectional LSTM across time
-    3. Average pooling of last 3 timesteps
-    4. Column chunking for memory efficiency
+    1. Instance normalization first (per column, across time; scale-invariant)
+    2. 1D CNN across features (per column)
+    3. Bidirectional LSTM across time
+    4. Average pooling of last 3 timesteps
+    5. Column chunking for memory efficiency
 
-    Matches PyTorch implementation from eigen2/models/networks.py:16-134
+    Synced with Eigen2: Instance Norm before CNN; default 117 columns.
     """
-    num_columns: int = 669
+    num_columns: int = 117  # Eigen2 TOTAL_COLUMNS (skinny)
     num_features: int = 5  # [close, RSI, MACD_signal, TRIX, diff20DMA]
     cnn_filters: int = 32
     cnn_kernel_size: int = 3
@@ -193,6 +194,12 @@ class FeatureExtractor(nn.Module):
 
         # Flatten batch and chunk dimensions: [batch*chunk_size, num_features, time_steps]
         x_chunk = x_chunk.reshape(batch_size * chunk_size, self.num_features, time_steps)
+
+        # Eigen2: Instance normalization first (per column, across time; affine=False)
+        # Makes model scale-invariant (raw nominal data)
+        mean = jnp.mean(x_chunk, axis=2, keepdims=True)
+        var = jnp.var(x_chunk, axis=2, keepdims=True) + 1e-5
+        x_chunk = (x_chunk - mean) * jax.lax.rsqrt(var)
 
         # CNN across features (with optional gradient checkpointing)
         if train and self.use_remat:

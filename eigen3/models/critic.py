@@ -22,7 +22,7 @@ from eigen3.models.attention import SelfAttentionModule
 class Critic(nn.Module):
     """Critic network: estimates Q-value for state-action pair
 
-    Matches PyTorch implementation from eigen2/models/networks.py:453-532
+    Synced with Eigen2 (mean pool, 117 cols). Original: eigen2/models/networks.py:453-532
     """
     # Architecture parameters
     num_investable_stocks: int = 108
@@ -111,12 +111,12 @@ class Critic(nn.Module):
         """
         # Extract features
         features = self.feature_extractor(state, train=train)
-        # [batch, 669, lstm_output_size]
+        # [batch, num_columns, lstm_output_size]
 
         # Apply attention if enabled
         if self.attention is not None:
             features, _ = self.attention(features, train=train, return_attention_weights=False)
-            # [batch, 669, lstm_output_size]
+            # [batch, num_columns, lstm_output_size]
 
         # Pool features across all columns
         state_features = jnp.mean(features, axis=1)  # [batch, lstm_output_size]
@@ -138,18 +138,14 @@ class Critic(nn.Module):
 
 
 class DoubleCritic(nn.Module):
-    """Twin Q-networks for TD3-style training
-
-    Implements two independent critic networks that share the same architecture.
-    This is used to reduce overestimation bias in Q-learning.
-    """
+    """Twin Q-networks for TD3-style training (Eigen2-aligned)."""
     # Architecture parameters
     num_investable_stocks: int = 108
     action_dim: int = 2
     critic_hidden_dims: Tuple[int, int] = (256, 128)
 
-    # Feature extraction parameters
-    num_columns: int = 669
+    # Feature extraction parameters (Eigen2: 117 columns)
+    num_columns: int = 117
     num_features: int = 5
 
     # Attention parameters

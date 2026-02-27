@@ -1,0 +1,39 @@
+# Trading environment config (Eigen2-aligned)
+# Synced with Eigen2 environment/trading_env and utils/config
+
+# Data dimensions (Eigen2 skinny)
+context_window_days: 151
+num_columns: 117
+num_investable_stocks: 108
+investable_start_col: 9
+num_features_obs: 5
+num_features_full: 9
+
+# Episode structure
+trading_period_days: 125
+settlement_period_days: 30
+min_holding_period: 20
+liquidation_window_days: 10
+max_holding_period: 30
+
+# Position limits
+max_positions: 10
+max_trades_per_day: 5
+
+# Rewards and penalties (Eigen2)
+inaction_penalty: 0.0
+coefficient_threshold: 1.0
+hurdle_rate: 0.006
+conviction_scaling_power: 1.25
+forced_exit_penalty_pct: 0.01
+loss_penalty_multiplier: 1.0
+
+# Sale target bounds
+min_sale_target: 10.0
+max_sale_target: 50.0
+
+# Observation noise (Eigen2 regularization)
+observation_noise_std: 0.01
+
+# Data path (override via CLI)
+data_path: data/raw/stock_data.pkl

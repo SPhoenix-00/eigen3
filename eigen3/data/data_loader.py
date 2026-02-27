@@ -16,21 +16,29 @@ import pandas as pd
 class DataConfig:
     """Configuration for data loading and preprocessing
 
+    Aligned with Eigen2: skinny dataset 117 columns, context 151 days, three-tier split.
+
     Args:
         data_path: Path to data directory or file
         num_features_obs: Number of features for observations (default 5)
         num_features_full: Number of features for full data (default 9)
-        num_columns: Number of stock columns (default 669)
-        normalize: Whether to normalize the data
+        num_columns: Number of stock columns (default 117, Eigen2 skinny)
+        context_window_days: Lookback window (default 151, Eigen2)
+        normalize: Whether to use global normalization (False = identity for Instance Norm in network)
         train_split: Fraction of data for training (rest is validation)
+        validation_days: Days reserved for walk-forward validation (Eigen2: 503)
+        committee_holdout_days: Days reserved for committee/holdout (Eigen2: 252)
         min_days: Minimum number of days required
     """
     data_path: str
     num_features_obs: int = 5
     num_features_full: int = 9
-    num_columns: int = 669
-    normalize: bool = True
+    num_columns: int = 117  # Eigen2 TOTAL_COLUMNS (skinny)
+    context_window_days: int = 151  # Eigen2 CONTEXT_WINDOW_DAYS
+    normalize: bool = False  # Eigen2 uses identity norm; Instance Norm in FeatureExtractor
     train_split: float = 0.8
+    validation_days: int = 503
+    committee_holdout_days: int = 252
     min_days: int = 1000
 
 
@@ -394,7 +402,7 @@ class StockDataLoader:
 
 def create_synthetic_data(
     num_days: int = 1000,
-    num_columns: int = 669,
+    num_columns: int = 117,
     seed: int = 42,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:
     """Create synthetic stock data for testing
@@ -462,21 +470,34 @@ def create_synthetic_data(
     return data_obs, data_full, norm_stats
 
 
-def load_eigen2_data(eigen2_data_path: str) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:
-    """Load data from eigen2 format
+def load_eigen2_data(
+    eigen2_data_path: str,
+    use_identity_norm: bool = True,
+) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:
+    """Load data from Eigen2 format (pre-exported npy/npz or directory).
+
+    Eigen2 uses identity normalization (mean=0, std=1); Instance Normalization
+    is applied inside the FeatureExtractor. Schema: data_array [T, 117, 5],
+    data_array_full [T, 117, 9] for skinny dataset.
 
     Args:
-        eigen2_data_path: Path to eigen2 data directory
+        eigen2_data_path: Path to eigen2 data directory (or file path)
+        use_identity_norm: If True, return norm_stats mean=0, std=1 (Eigen2 default)
 
     Returns:
         Tuple of (data_obs, data_full, norm_stats)
     """
     data_path = Path(eigen2_data_path)
 
-    # Look for expected files
-    obs_path = data_path / "data_array.npy"
-    full_path = data_path / "data_array_full.npy"
-    stats_path = data_path / "norm_stats.npz"
+    # Support both directory (with data_array.npy, etc.) and direct .npy/.npz
+    if data_path.is_dir():
+        obs_path = data_path / "data_array.npy"
+        full_path = data_path / "data_array_full.npy"
+        stats_path = data_path / "norm_stats.npz"
+    else:
+        obs_path = data_path
+        full_path = data_path.parent / "data_array_full.npy"
+        stats_path = data_path.parent / "norm_stats.npz"
 
     if not obs_path.exists():
         raise FileNotFoundError(f"Observation data not found: {obs_path}")
@@ -489,22 +510,21 @@ def load_eigen2_data(eigen2_data_path: str) -> Tuple[jnp.ndarray, jnp.ndarray, D
     data_obs = np.load(obs_path)
     data_full = np.load(full_path)
 
-    # Load normalization stats if available
-    if stats_path.exists():
+    num_cols = data_obs.shape[1]
+    num_feat_obs = data_obs.shape[2]
+
+    # Eigen2: identity norm (Instance Norm in network); optional npz overrides
+    if stats_path.exists() and not use_identity_norm:
         stats = np.load(stats_path)
         norm_stats = {
             'mean': jnp.array(stats['mean']),
             'std': jnp.array(stats['std']),
         }
     else:
-        # Compute from data
-        mean = np.mean(data_obs, axis=(0, 1))
-        std = np.std(data_obs, axis=(0, 1))
-        std = np.where(std < 1e-8, 1.0, std)
-
+        # Identity transform (Eigen2 default)
         norm_stats = {
-            'mean': jnp.array(mean),
-            'std': jnp.array(std),
+            'mean': jnp.zeros((num_cols, num_feat_obs), dtype=jnp.float32),
+            'std': jnp.ones((num_cols, num_feat_obs), dtype=jnp.float32),
         }
 
     # Convert to JAX
@@ -514,3 +534,29 @@ def load_eigen2_data(eigen2_data_path: str) -> Tuple[jnp.ndarray, jnp.ndarray, D
     print(f"Loaded {data_obs.shape[0]} days, {data_obs.shape[1]} columns")
 
     return data_obs, data_full, norm_stats
+
+
+def load_trading_data(
+    filepath: str,
+    use_identity_norm: bool = True,
+) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:
+    """Load trading data for Eigen3 (Eigen2-compatible schema).
+
+    Dispatches to load_eigen2_data when path is a directory containing
+    data_array.npy / data_array_full.npy. Returns (data_obs, data_full, norm_stats)
+    with shapes [T, num_columns, 5], [T, num_columns, 9], and dict with 'mean'/'std'.
+    Eigen2 skinny dataset: 117 columns.
+
+    Args:
+        filepath: Path to data directory (with data_array.npy, data_array_full.npy)
+        use_identity_norm: If True, use identity norm (Eigen2 default)
+
+    Returns:
+        Tuple of (data_obs, data_full, norm_stats)
+    """
+    path = Path(filepath)
+    if path.is_dir():
+        return load_eigen2_data(str(path), use_identity_norm)
+    if path.suffix == '.npy' and path.parent.exists():
+        return load_eigen2_data(str(path.parent), use_identity_norm)
+    raise FileNotFoundError(f"Unsupported path or missing data: {filepath}")

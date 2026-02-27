@@ -35,7 +35,7 @@ class TradingAgent(Agent):
     """DDPG-based trading agent for stock market simulation
 
     Implements the EvoRL Agent interface with DDPG algorithm.
-    Matches PyTorch implementation from eigen2/models/ddpg_agent.py
+    Synced with Eigen2: coefficient clip [0, 100], exploration noise, soft target updates.
     """
 
     # Network architecture
@@ -126,16 +126,14 @@ class TradingAgent(Agent):
             return_attention_weights=False
         )
 
-        # Add exploration noise
+        # Add exploration noise (Eigen2: NOISE_SCALE)
         noise = jax.random.normal(key, actions.shape) * self.exploration_noise
         noisy_actions = actions + noise
 
-        # Clip to valid ranges
-        # Coefficient: >= 0
+        # Clip to valid ranges (Eigen2: coefficient [0, 100], sale target [10, 50])
         noisy_actions = noisy_actions.at[:, :, 0].set(
-            jnp.maximum(noisy_actions[:, :, 0], 0.0)
+            jnp.clip(noisy_actions[:, :, 0], 0.0, 100.0)
         )
-        # Sale target: [min_sale_target, max_sale_target]
         noisy_actions = noisy_actions.at[:, :, 1].set(
             jnp.clip(noisy_actions[:, :, 1], self.min_sale_target, self.max_sale_target)
         )

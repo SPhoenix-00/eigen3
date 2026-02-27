@@ -15,10 +15,12 @@ rl_updates_per_gen: 32  # Gradient steps per generation
 batch_size: 64
 gradient_accumulation_steps: 2  # Effective batch size: 128
 
-# DDPG hyperparameters
+# DDPG hyperparameters (Eigen2-aligned)
 discount: 0.99
 tau: 0.005  # Soft target update rate
-exploration_noise: 0.1
+exploration_noise: 0.125  # Eigen2 NOISE_SCALE
+noise_decay: 0.99995  # Eigen2 NOISE_DECAY
+min_noise: 0.01  # Eigen2 MIN_NOISE
 policy_noise: 0.2  # For TD3-style delayed policy updates
 clip_policy_noise: 0.5
 actor_update_interval: 2  # Update actor every N critic updates
@@ -41,22 +43,22 @@ champion_injection: true  # Inject all-time best validation agent
 replay_buffer_size: 100000
 warmup_episodes: 10  # Fill buffer before training
 
-# Network architecture
+# Network architecture (Eigen2: 117 columns, 151 context)
 actor_network:
   num_stocks: 108
-  stock_start_idx: 8
-  use_remat: true  # Gradient checkpointing
+  stock_start_idx: 9  # Eigen2 INVESTABLE_START_COL
+  use_remat: true
 
 critic_network:
   use_attention: false
   use_remat: true
 
 feature_extractor:
-  num_columns: 669
+  num_columns: 117  # Eigen2 TOTAL_COLUMNS (skinny)
   cnn_filters: 32
   lstm_hidden_size: 128
   num_lstm_layers: 2
-  chunk_size: 64  # Process columns in chunks
+  chunk_size: 64
 
 attention_module:
   embed_dim: 256

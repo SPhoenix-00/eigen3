@@ -16,7 +16,7 @@ from evorl.envs import Env
 
 
 class TradingEnvState(PyTreeData):
-    """Trading environment internal state (immutable)"""
+    """Trading environment internal state (immutable). Synced with Eigen2."""
     # Time tracking
     current_step: chex.Array  # scalar int
     start_step: chex.Array  # scalar int
@@ -38,6 +38,9 @@ class TradingEnvState(PyTreeData):
     days_with_positions: chex.Array  # scalar int
     days_without_positions: chex.Array  # scalar int
 
+    # RNG for observation noise (Eigen2: multiplicative noise when is_training)
+    rng_key: chex.Array = pytree_field(default_factory=lambda: jnp.zeros((2,), dtype=jnp.uint32))
+
 
 class EnvState(PyTreeData):
     """EvoRL-compatible environment state"""
@@ -51,8 +54,7 @@ class EnvState(PyTreeData):
 class TradingEnv(Env):
     """JAX-native trading environment for stock market simulation
 
-    Matches PyTorch implementation from eigen2/environment/trading_env.py
-    but with pure functional design for JAX.
+    Synced with Eigen2 (holding periods, hurdle, conviction, obs noise). Original: eigen2/environment/trading_env.py.
 
     Observation: [context_days, num_columns, num_features] normalized window
     Action: [num_investable_stocks, 2] with [coefficient, sale_target] per stock
@@ -61,42 +63,53 @@ class TradingEnv(Env):
 
     def __init__(
         self,
-        data_array: chex.Array,  # [num_days, 669, 5] for observations
-        data_array_full: chex.Array,  # [num_days, 669, 9] for rewards
+        data_array: chex.Array,  # [num_days, num_columns, 5] for observations
+        data_array_full: chex.Array,  # [num_days, num_columns, 9] for rewards
         norm_stats: dict,  # {'mean': array, 'std': array}
-        context_window_days: int = 504,
+        context_window_days: int = 151,
         trading_period_days: int = 125,
-        settlement_period_days: int = 20,
-        max_holding_days: int = 20,
+        settlement_period_days: int = 30,
+        min_holding_period: int = 20,
+        max_holding_days: int = 30,
         max_positions: int = 10,
-        inaction_penalty: float = 5.0,
-        coefficient_threshold: float = 0.5,
+        inaction_penalty: float = 0.0,
+        coefficient_threshold: float = 1.0,
         min_coefficient: float = 1.0,
         min_sale_target: float = 10.0,
         max_sale_target: float = 50.0,
-        investable_start_col: int = 8,
+        investable_start_col: int = 9,
         num_investable_stocks: int = 108,
         loss_penalty_multiplier: float = 1.0,
+        hurdle_rate: float = 0.006,
+        conviction_scaling_power: float = 1.25,
+        forced_exit_penalty_pct: float = 0.01,
+        observation_noise_std: float = 0.01,
+        is_training: bool = True,
     ):
-        """Initialize trading environment
+        """Initialize trading environment (Eigen2-aligned).
 
         Args:
             data_array: Observation data [num_days, num_columns, num_features]
             data_array_full: Full data for rewards [num_days, num_columns, 9]
             norm_stats: Normalization statistics {'mean', 'std'}
-            context_window_days: Lookback window size
+            context_window_days: Lookback window (Eigen2: 151)
             trading_period_days: Days to open new positions
-            settlement_period_days: Days to close existing positions
-            max_holding_days: Force exit after N days
+            settlement_period_days: Days to close (Eigen2: 30, >= max_holding_days)
+            min_holding_period: Cannot sell before this many days (Eigen2: 20)
+            max_holding_days: Force exit after N days (Eigen2: 30)
             max_positions: Maximum concurrent positions
-            inaction_penalty: Penalty per day with no positions
+            inaction_penalty: Penalty per day with no positions (Eigen2: 0.0)
             coefficient_threshold: Minimum coefficient to open position
             min_coefficient: Absolute minimum coefficient
-            min_sale_target: Minimum sale target percentage
-            max_sale_target: Maximum sale target percentage
-            investable_start_col: Starting column for investable stocks
-            num_investable_stocks: Number of tradeable stocks
+            min_sale_target / max_sale_target: Sale target % bounds
+            investable_start_col: Starting column for investable stocks (Eigen2: 9)
+            num_investable_stocks: Number of tradeable stocks (108)
             loss_penalty_multiplier: Multiplier for loss penalties
+            hurdle_rate: Hurdle rate for reward (Eigen2: 0.006)
+            conviction_scaling_power: Power for conviction scaling (Eigen2: 1.25)
+            forced_exit_penalty_pct: Penalty when exit due to max_holding (Eigen2: 0.01)
+            observation_noise_std: Multiplicative obs noise when is_training (Eigen2: 0.01)
+            is_training: If True, apply observation noise
         """
         self.data_array = jnp.array(data_array, dtype=jnp.float32)
         self.data_array_full = jnp.array(data_array_full, dtype=jnp.float32)
@@ -106,6 +119,7 @@ class TradingEnv(Env):
         self.context_window_days = context_window_days
         self.trading_period_days = trading_period_days
         self.settlement_period_days = settlement_period_days
+        self.min_holding_period = min_holding_period
         self.max_holding_days = max_holding_days
         self.max_positions = max_positions
         self.inaction_penalty = inaction_penalty
@@ -116,6 +130,11 @@ class TradingEnv(Env):
         self.investable_start_col = investable_start_col
         self.num_investable_stocks = num_investable_stocks
         self.loss_penalty_multiplier = loss_penalty_multiplier
+        self.hurdle_rate = hurdle_rate
+        self.conviction_scaling_power = conviction_scaling_power
+        self.forced_exit_penalty_pct = forced_exit_penalty_pct
+        self.observation_noise_std = observation_noise_std
+        self.is_training = is_training
 
         # Compute valid episode ranges
         self.min_start_idx = context_window_days
@@ -168,7 +187,7 @@ class TradingEnv(Env):
         # Position format: [stock_idx, entry_step, entry_price, target_price, coefficient, is_active]
         positions = jnp.zeros((self.max_positions, 6), dtype=jnp.float32)
 
-        # Create initial trading state
+        # Create initial trading state (rng_key for observation noise)
         trading_state = TradingEnvState(
             current_step=start_idx,
             start_step=start_idx,
@@ -183,10 +202,11 @@ class TradingEnv(Env):
             total_gain_pct=jnp.array(0.0, dtype=jnp.float32),
             days_with_positions=jnp.array(0, dtype=jnp.int32),
             days_without_positions=jnp.array(0, dtype=jnp.int32),
+            rng_key=key,
         )
 
-        # Get initial observation
-        obs = self._get_observation(trading_state)
+        # Get initial observation (with optional noise when is_training)
+        obs = self._get_observation(trading_state, key)
 
         return EnvState(
             env_state=trading_state,
@@ -244,6 +264,9 @@ class TradingEnv(Env):
         new_step = env_state.current_step + 1
         done = new_step >= env_state.end_step
 
+        # Split RNG for next step observation noise
+        step_key, next_key = jax.random.split(env_state.rng_key)
+
         # 5. Update state
         new_env_state = env_state.replace(
             current_step=new_step,
@@ -256,10 +279,11 @@ class TradingEnv(Env):
             total_gain_pct=total_gain,
             days_with_positions=days_with,
             days_without_positions=days_without,
+            rng_key=next_key,
         )
 
-        # Get new observation
-        obs = self._get_observation(new_env_state)
+        # Get new observation (with optional noise when is_training)
+        obs = self._get_observation(new_env_state, step_key)
 
         return EnvState(
             env_state=new_env_state,
@@ -268,11 +292,12 @@ class TradingEnv(Env):
             done=done,
         )
 
-    def _get_observation(self, env_state: TradingEnvState) -> chex.Array:
-        """Get normalized observation window
+    def _get_observation(self, env_state: TradingEnvState, key: chex.PRNGKey = None) -> chex.Array:
+        """Get normalized observation window (Eigen2: optional multiplicative noise when is_training).
 
         Args:
             env_state: Current trading state
+            key: JAX PRNG key for observation noise (used when is_training and observation_noise_std > 0)
 
         Returns:
             Normalized window [context_days, num_columns, num_features]
@@ -287,8 +312,21 @@ class TradingEnv(Env):
             (self.context_window_days, self.data_array.shape[1], self.data_array.shape[2])
         )
 
-        # Normalize
-        normalized = (window - self.norm_mean) / (self.norm_std + 1e-8)
+        # Normalize (support (C,F) or (F,) norm_stats)
+        norm_mean = self.norm_mean
+        norm_std = self.norm_std
+        if norm_mean.ndim == 1:
+            norm_mean = jnp.reshape(norm_mean, (1, 1, -1))
+            norm_std = jnp.reshape(norm_std, (1, 1, -1))
+        else:
+            norm_mean = jnp.reshape(norm_mean, (1, norm_mean.shape[0], norm_mean.shape[1]))
+            norm_std = jnp.reshape(norm_std, (1, norm_std.shape[0], norm_std.shape[1]))
+        normalized = (window - norm_mean) / (norm_std + 1e-8)
+
+        # Eigen2: multiplicative observation noise for regularization when is_training
+        if self.is_training and self.observation_noise_std > 0 and key is not None:
+            noise = jax.random.normal(key, normalized.shape) * self.observation_noise_std
+            normalized = normalized * (1.0 + noise)
 
         return normalized
 
@@ -320,7 +358,7 @@ class TradingEnv(Env):
                 return position, 0.0, 0, 0, 0.0
 
             def active_branch():
-                # Increment days held
+                # Days held (Eigen2: MIN_HOLDING_PERIOD=20, MAX_HOLDING_PERIOD=30)
                 days_held = env_state.current_step - entry_step
 
                 # Get current stock data
@@ -332,10 +370,12 @@ class TradingEnv(Env):
                 close_price = current_data[1]  # Close price
                 is_valid = jnp.isfinite(close_price)
 
-                # Check exit conditions
+                # Eigen2: Cannot sell before min_holding_period; can sell when target hit in [min, max); force at max
                 target_hit = day_high >= target_price
+                can_sell_window = days_held >= self.min_holding_period
                 max_holding_reached = days_held >= self.max_holding_days
-                should_exit = target_hit | max_holding_reached | ~is_valid
+                should_exit = (~is_valid) | (can_sell_window & (target_hit | max_holding_reached))
+                exit_due_to_max_holding = should_exit & max_holding_reached & ~target_hit
 
                 # Determine exit price
                 exit_price = jax.lax.select(
@@ -347,12 +387,25 @@ class TradingEnv(Env):
                 # Calculate gain/loss
                 gain_pct = ((exit_price - entry_price) / entry_price) * 100.0
 
-                # Calculate reward (apply loss penalty multiplier for losses)
-                pos_reward = jax.lax.select(
-                    gain_pct >= 0,
-                    coefficient * gain_pct,
-                    -self.loss_penalty_multiplier * coefficient * jnp.abs(gain_pct)
+                # Eigen2: hurdle rate and conviction scaling
+                hurdle_pct = self.hurdle_rate * 100.0
+                net_gain_pct = gain_pct - hurdle_pct
+                scaled_coef = jnp.power(coefficient, self.conviction_scaling_power)
+
+                # Base reward (win: linear; loss: scaled by loss_penalty_multiplier)
+                base_reward = jax.lax.select(
+                    net_gain_pct >= 0,
+                    scaled_coef * net_gain_pct,
+                    scaled_coef * net_gain_pct * self.loss_penalty_multiplier
                 )
+
+                # Forced exit penalty (Eigen2: lack of decisiveness)
+                forced_penalty = jax.lax.select(
+                    exit_due_to_max_holding,
+                    entry_price * coefficient * self.forced_exit_penalty_pct,
+                    0.0
+                )
+                pos_reward = jax.lax.select(should_exit, base_reward - forced_penalty, 0.0)
 
                 # Update position (close if should_exit)
                 new_position = jax.lax.select(
@@ -364,11 +417,10 @@ class TradingEnv(Env):
                 # Win/loss tracking
                 win = jax.lax.select(should_exit & (gain_pct > 0), 1, 0)
                 loss = jax.lax.select(should_exit & (gain_pct <= 0), 1, 0)
-                trade = jax.lax.select(should_exit, 1, 0)
 
                 return (
                     new_position,
-                    jax.lax.select(should_exit, pos_reward, 0.0),
+                    pos_reward,
                     win,
                     loss,
                     jax.lax.select(should_exit, gain_pct, 0.0),
@@ -473,14 +525,14 @@ class TradingEnv(Env):
 
 
 def test_trading_env():
-    """Test the TradingEnv implementation"""
+    """Test the TradingEnv implementation (Eigen2-aligned defaults)."""
     import jax.random as random
 
     print("Testing TradingEnv...")
 
-    # Create dummy data
+    # Create dummy data (Eigen2 skinny: 117 columns, 151 context)
     num_days = 1000
-    num_columns = 669
+    num_columns = 117
     data_array = jnp.ones((num_days, num_columns, 5))
     data_array_full = jnp.ones((num_days, num_columns, 9))
 
@@ -492,11 +544,11 @@ def test_trading_env():
     data_array_full = data_array_full.at[:, :, 2].set(prices * 1.02)  # High prices
 
     norm_stats = {
-        'mean': jnp.zeros(5),
-        'std': jnp.ones(5)
+        'mean': jnp.zeros((num_columns, 5)),
+        'std': jnp.ones((num_columns, 5))
     }
 
-    # Create environment
+    # Create environment (defaults: context 151, min_holding 20, max_holding 30)
     env = TradingEnv(data_array, data_array_full, norm_stats)
 
     # Test reset
@@ -505,8 +557,8 @@ def test_trading_env():
 
     print(f"✓ Reset successful")
     print(f"  Observation shape: {state.obs.shape}")
-    print(f"  Expected: (504, 669, 5)")
-    assert state.obs.shape == (504, 669, 5)
+    print(f"  Expected: (151, 117, 5)")
+    assert state.obs.shape == (151, 117, 5)
 
     # Test step
     action = jnp.ones((108, 2))
@@ -519,6 +571,7 @@ def test_trading_env():
     print(f"  Observation shape: {new_state.obs.shape}")
     print(f"  Reward: {new_state.reward}")
     print(f"  Done: {new_state.done}")
+    assert new_state.obs.shape == (151, 117, 5)
 
     # Run multiple steps
     print("\nRunning 10 steps...")

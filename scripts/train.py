@@ -1,4 +1,4 @@
-"""Training script for Eigen3 trading system"""
+"""Training script for Eigen3 trading system (Eigen2-aligned)."""
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -7,18 +7,15 @@ import jax.numpy as jnp
 from pathlib import Path
 import logging
 
-# These imports will be available after implementation
-# from eigen3.workflows.trading_erl_workflow import TradingERLWorkflow
-# from eigen3.data.loader import load_trading_data
-# from eigen3.utils.logging import setup_logger
-# from eigen3.utils.checkpointing import save_checkpoint
+from eigen3.data import load_trading_data, create_synthetic_data
+from eigen3.environment.trading_env import TradingEnv
 
 logger = logging.getLogger(__name__)
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
-    """Main training function"""
+    """Main training function: load data, create env, then run EvoRL workflow when integrated."""
 
     # Print configuration
     logger.info("Configuration:")
@@ -28,55 +25,53 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"Setting random seed: {cfg.seed}")
     key = jax.random.PRNGKey(cfg.seed)
 
-    # Load data
-    logger.info(f"Loading data from: {cfg.env.data_path}")
-    # data_array, data_array_full, norm_stats = load_trading_data(cfg.env.data_path)
+    # Load data (Eigen2-compatible schema: 117 cols, identity norm)
+    data_path = OmegaConf.select(cfg, "env.data_path", default="data/raw")
+    path = Path(data_path)
+    if path.is_dir() and (path / "data_array.npy").exists():
+        logger.info(f"Loading data from: {data_path}")
+        data_array, data_array_full, norm_stats = load_trading_data(str(path))
+    else:
+        logger.info("Using synthetic data (Eigen2 dimensions: 117 columns)")
+        num_cols = OmegaConf.select(cfg, "env.num_columns", default=117)
+        data_array, data_array_full, norm_stats = create_synthetic_data(
+            num_days=2000,
+            num_columns=num_cols,
+            seed=cfg.seed,
+        )
 
-    # Create environment
+    logger.info(f"Data shapes: obs {data_array.shape}, full {data_array_full.shape}")
+
+    # Create environment (Eigen2-aligned defaults from config)
     logger.info("Creating trading environment...")
-    # env = create_trading_env(cfg.env, data_array, data_array_full, norm_stats)
+    def _env_cfg(key: str, default):
+        return OmegaConf.select(cfg, f"env.{key}", default=default)
 
-    # Create workflow
-    logger.info(f"Creating workflow: {cfg.agent.workflow_cls}")
-    # workflow_cls = hydra.utils.get_class(cfg.agent.workflow_cls)
-    # workflow = workflow_cls.build_from_config(
-    #     cfg.agent,
-    #     env=env,
-    #     enable_jit=cfg.enable_jit,
-    #     enable_pmap=cfg.enable_pmap,
-    # )
+    env = TradingEnv(
+        data_array=data_array,
+        data_array_full=data_array_full,
+        norm_stats=norm_stats,
+        context_window_days=_env_cfg("context_window_days", 151),
+        trading_period_days=_env_cfg("trading_period_days", 125),
+        settlement_period_days=_env_cfg("settlement_period_days", 30),
+        min_holding_period=_env_cfg("min_holding_period", 20),
+        max_holding_days=_env_cfg("max_holding_period", 30),
+        investable_start_col=_env_cfg("investable_start_col", 9),
+        num_investable_stocks=_env_cfg("num_investable_stocks", 108),
+    )
 
-    # Initialize workflow state
-    logger.info("Initializing workflow state...")
-    # state = workflow.init(key)
+    # Workflow: instantiate TradingERLWorkflow with env, agent, evaluator, config when ready
+    # For now we only run a quick env sanity check
+    try:
+        state = env.reset(key)
+        logger.info(f"Env reset OK; obs shape: {state.obs.shape}")
+    except Exception as e:
+        logger.warning(f"Env reset failed (evorl may not be installed): {e}")
 
-    # Training loop
-    logger.info("Starting training...")
-    # for generation in range(cfg.agent.total_generations):
-    #     # Training step
-    #     metrics, state = workflow.step(state)
-    #
-    #     # Log metrics
-    #     if generation % cfg.logging.log_interval == 0:
-    #         logger.info(f"Generation {generation}: {metrics}")
-    #
-    #     # Save checkpoint
-    #     if generation % cfg.agent.save_interval == 0:
-    #         checkpoint_path = Path(cfg.checkpoint_dir) / f"gen_{generation}.pkl"
-    #         save_checkpoint(checkpoint_path, state, cfg)
-    #         logger.info(f"Saved checkpoint: {checkpoint_path}")
-    #
-    #     # Validation
-    #     if generation % cfg.agent.eval_interval == 0:
-    #         eval_metrics = workflow.evaluate(state)
-    #         logger.info(f"Validation metrics: {eval_metrics}")
-
-    # Final save
-    # final_checkpoint = Path(cfg.checkpoint_dir) / "final_model.pkl"
-    # save_checkpoint(final_checkpoint, state, cfg)
-    # logger.info(f"Training complete! Final model saved to: {final_checkpoint}")
-
-    logger.info("Training script template - implementation pending")
+    logger.info(
+        "Data and env wired. To run full training, instantiate TradingERLWorkflow "
+        "(eigen3.workflows.trading_workflow) with env, agent, evaluator, and config."
+    )
 
 
 if __name__ == "__main__":
