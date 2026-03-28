@@ -60,7 +60,6 @@ def main(cfg: DictConfig) -> None:
         trading_period_days=_env_cfg("trading_period_days", 125),
         settlement_period_days=_env_cfg("settlement_period_days", 30),
         min_holding_period=_env_cfg("min_holding_period", 20),
-        max_holding_days=_env_cfg("max_holding_period", 30),
         max_positions=_env_cfg("max_positions", 10),
         inaction_penalty=_env_cfg("inaction_penalty", 0.0),
         coefficient_threshold=_env_cfg("coefficient_threshold", 1.0),
@@ -71,7 +70,6 @@ def main(cfg: DictConfig) -> None:
         loss_penalty_multiplier=_env_cfg("loss_penalty_multiplier", 1.0),
         hurdle_rate=_env_cfg("hurdle_rate", 0.006),
         conviction_scaling_power=_env_cfg("conviction_scaling_power", 1.25),
-        forced_exit_penalty_pct=_env_cfg("forced_exit_penalty_pct", 0.01),
         observation_noise_std=_env_cfg("observation_noise_std", 0.01),
     )
 

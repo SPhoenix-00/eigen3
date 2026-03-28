@@ -20,11 +20,10 @@ Eigen3 combines Deep Reinforcement Learning (DDPG) with Evolutionary Algorithms 
 - **Critic**: Value network (twin Q-functions for TD3-style training)
 
 ### Environment
-- **TradingEnv**: JAX-native stock trading simulator (Eigen2-aligned)
-- 117 stock columns (108 investable; skinny dataset)
-- 151-day context windows
-- Min/max holding periods (20–30 days), hurdle and conviction-based rewards
-- Position management with exit conditions
+- **TradingEnv**: JAX-native stock trading simulator (multi-stock default; mono via `configs/env/trading_mono.yaml`)
+- Default data layout: 117 columns, 108 investable from column 9; 151 **trading-day** context windows
+- **Exits**: No forced max-holding exit. Target-based sells use the daily high vs. each lot’s target, only after `min_holding_period` **trading days** since the **last buy** for that stock. Additional buys on the same stock are allowed (up to `max_positions` lots). Any open lots are **liquidated at the episode’s last step** at the close.
+- Hurdle rate, conviction scaling, optional observation noise; fixed-size position table
 
 ### Training
 - **Population-based ERL**: 16 agents with genetic operators

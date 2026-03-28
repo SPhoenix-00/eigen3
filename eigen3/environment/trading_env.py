@@ -52,9 +52,12 @@ class EnvState(PyTreeData):
 
 
 class TradingEnv(Env):
-    """JAX-native trading environment for stock market simulation
+    """JAX-native trading environment for stock market simulation.
 
-    Synced with Eigen2 (holding periods, hurdle, conviction, obs noise). Original: eigen2/environment/trading_env.py.
+    Supports single-stock (mono) and multi-stock modes:
+    - Multiple buys allowed on the same stock
+    - No sell until min_holding_period trading days since the last buy
+    - All remaining positions liquidated at episode end
 
     Observation: [context_days, num_columns, num_features] normalized window
     Action: [num_investable_stocks, 2] with [coefficient, sale_target] per stock
@@ -70,7 +73,6 @@ class TradingEnv(Env):
         trading_period_days: int = 125,
         settlement_period_days: int = 30,
         min_holding_period: int = 20,
-        max_holding_days: int = 30,
         max_positions: int = 10,
         inaction_penalty: float = 0.0,
         coefficient_threshold: float = 1.0,
@@ -82,33 +84,30 @@ class TradingEnv(Env):
         loss_penalty_multiplier: float = 1.0,
         hurdle_rate: float = 0.006,
         conviction_scaling_power: float = 1.25,
-        forced_exit_penalty_pct: float = 0.01,
         observation_noise_std: float = 0.01,
         is_training: bool = True,
     ):
-        """Initialize trading environment (Eigen2-aligned).
+        """Initialize trading environment.
 
         Args:
             data_array: Observation data [num_days, num_columns, num_features]
             data_array_full: Full data for rewards [num_days, num_columns, 9]
             norm_stats: Normalization statistics {'mean', 'std'}
-            context_window_days: Lookback window (Eigen2: 151)
+            context_window_days: Lookback window (default 151)
             trading_period_days: Days to open new positions
-            settlement_period_days: Days to close (Eigen2: 30, >= max_holding_days)
-            min_holding_period: Cannot sell before this many days (Eigen2: 20)
-            max_holding_days: Force exit after N days (Eigen2: 30)
+            settlement_period_days: Buffer after trading for positions to close
+            min_holding_period: Min trading days since last buy before any sell
             max_positions: Maximum concurrent positions
-            inaction_penalty: Penalty per day with no positions (Eigen2: 0.0)
+            inaction_penalty: Penalty per day with no positions
             coefficient_threshold: Minimum coefficient to open position
             min_coefficient: Absolute minimum coefficient
             min_sale_target / max_sale_target: Sale target % bounds
-            investable_start_col: Starting column for investable stocks (Eigen2: 9)
-            num_investable_stocks: Number of tradeable stocks (108)
+            investable_start_col: Starting column for investable stocks
+            num_investable_stocks: Number of tradeable stocks
             loss_penalty_multiplier: Multiplier for loss penalties
-            hurdle_rate: Hurdle rate for reward (Eigen2: 0.006)
-            conviction_scaling_power: Power for conviction scaling (Eigen2: 1.25)
-            forced_exit_penalty_pct: Penalty when exit due to max_holding (Eigen2: 0.01)
-            observation_noise_std: Multiplicative obs noise when is_training (Eigen2: 0.01)
+            hurdle_rate: Hurdle rate for reward
+            conviction_scaling_power: Power for conviction scaling
+            observation_noise_std: Multiplicative obs noise when is_training
             is_training: If True, apply observation noise
         """
         self.data_array = jnp.array(data_array, dtype=jnp.float32)
@@ -120,7 +119,6 @@ class TradingEnv(Env):
         self.trading_period_days = trading_period_days
         self.settlement_period_days = settlement_period_days
         self.min_holding_period = min_holding_period
-        self.max_holding_days = max_holding_days
         self.max_positions = max_positions
         self.inaction_penalty = inaction_penalty
         self.coefficient_threshold = coefficient_threshold
@@ -132,7 +130,6 @@ class TradingEnv(Env):
         self.loss_penalty_multiplier = loss_penalty_multiplier
         self.hurdle_rate = hurdle_rate
         self.conviction_scaling_power = conviction_scaling_power
-        self.forced_exit_penalty_pct = forced_exit_penalty_pct
         self.observation_noise_std = observation_noise_std
         self.is_training = is_training
 
@@ -347,7 +344,6 @@ class TradingEnv(Env):
         def update_single_position(position):
             """Update single position and check exit conditions"""
             stock_idx = position[0].astype(jnp.int32)
-            entry_step = position[1].astype(jnp.int32)
             entry_price = position[2]
             target_price = position[3]
             coefficient = position[4]
@@ -358,11 +354,10 @@ class TradingEnv(Env):
                 return position, 0.0, 0, 0, 0.0
 
             def active_branch():
-                # Days held (Eigen2: MIN_HOLDING_PERIOD=20, MAX_HOLDING_PERIOD=30)
-                days_held = env_state.current_step - entry_step
-
-                # Mono: Sell only after 20 trading days since last buy (for this stock)
-                # last_buy_step = max entry_step over all active positions in this stock
+                # No sell until >= min_holding_period trading days since the
+                # most recent buy for this stock (across all active lots).
+                # `positions` is the pre-update snapshot, closed over from
+                # the outer scope -- JAX treats it as a constant in vmap.
                 same_stock_active = (positions[:, 0] == stock_idx) & (positions[:, 5] > 0.5)
                 last_buy_step = jnp.max(jnp.where(same_stock_active, positions[:, 1], -1))
                 days_since_last_buy = env_state.current_step - last_buy_step
@@ -372,46 +367,39 @@ class TradingEnv(Env):
                 actual_col_idx = self.investable_start_col + stock_idx
                 current_data = self.data_array_full[env_state.current_step, actual_col_idx]
 
-                # Extract prices (full data: [Open, Close, High, Low, ...])
-                day_high = current_data[2]  # High price
-                close_price = current_data[1]  # Close price
+                day_high = current_data[2]
+                close_price = current_data[1]
                 is_valid = jnp.isfinite(close_price)
 
-                # Cannot sell before min_holding_period; can sell when target hit in [min, max); force at max
                 target_hit = day_high >= target_price
-                max_holding_reached = days_held >= self.max_holding_days
-                should_exit = (~is_valid) | (can_sell_window & (target_hit | max_holding_reached))
-                exit_due_to_max_holding = should_exit & max_holding_reached & ~target_hit
+                is_last_step = env_state.current_step >= env_state.end_step - 1
 
-                # Determine exit price
+                # Exit on: invalid data, end-of-episode liquidation, or
+                # target hit after the sell window opens.
+                exit_on_target = can_sell_window & target_hit
+                should_exit = (~is_valid) | is_last_step | exit_on_target
+
+                # Target price if genuinely sold on target; close price for
+                # liquidation or invalid-data exits.
                 exit_price = jax.lax.select(
-                    target_hit,
+                    exit_on_target,
                     target_price,
                     jax.lax.select(is_valid, close_price, entry_price)
                 )
 
-                # Calculate gain/loss
                 gain_pct = ((exit_price - entry_price) / entry_price) * 100.0
 
-                # Eigen2: hurdle rate and conviction scaling
                 hurdle_pct = self.hurdle_rate * 100.0
                 net_gain_pct = gain_pct - hurdle_pct
                 scaled_coef = jnp.power(coefficient, self.conviction_scaling_power)
 
-                # Base reward (win: linear; loss: scaled by loss_penalty_multiplier)
                 base_reward = jax.lax.select(
                     net_gain_pct >= 0,
                     scaled_coef * net_gain_pct,
                     scaled_coef * net_gain_pct * self.loss_penalty_multiplier
                 )
 
-                # Forced exit penalty (Eigen2: lack of decisiveness)
-                forced_penalty = jax.lax.select(
-                    exit_due_to_max_holding,
-                    entry_price * coefficient * self.forced_exit_penalty_pct,
-                    0.0
-                )
-                pos_reward = jax.lax.select(should_exit, base_reward - forced_penalty, 0.0)
+                pos_reward = jax.lax.select(should_exit, base_reward, 0.0)
 
                 # Update position (close if should_exit)
                 new_position = jax.lax.select(
@@ -551,7 +539,6 @@ def test_trading_env():
         'std': jnp.ones((num_columns, 5))
     }
 
-    # Create environment (defaults: context 151, min_holding 20, max_holding 30)
     env = TradingEnv(data_array, data_array_full, norm_stats)
 
     # Test reset

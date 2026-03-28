@@ -43,10 +43,10 @@ class TestTradingEnv:
 
         env = TradingEnv(data_array, data_array_full, norm_stats)
 
-        assert env.context_window_days == 504
+        assert env.context_window_days == 151
         assert env.trading_period_days == 125
-        assert env.settlement_period_days == 20
-        assert env.max_holding_days == 20
+        assert env.settlement_period_days == 30
+        assert env.min_holding_period == 20
         assert env.max_positions == 10
 
     def test_env_reset(self):
@@ -62,7 +62,7 @@ class TestTradingEnv:
         assert isinstance(state.env_state, TradingEnvState)
 
         # Check observation shape
-        assert state.obs.shape == (504, 669, 5)
+        assert state.obs.shape == (151, 669, 5)
 
         # Check initial values
         assert state.reward == 0.0
@@ -86,7 +86,7 @@ class TestTradingEnv:
         new_state = env.step(state, action)
 
         # Check output
-        assert new_state.obs.shape == (504, 669, 5)
+        assert new_state.obs.shape == (151, 669, 5)
         assert isinstance(new_state.reward, jnp.ndarray)
         assert isinstance(new_state.done, jnp.ndarray)
 
@@ -162,7 +162,7 @@ class TestTradingEnv:
 
             assert state.env_state.num_active_positions == 0
             assert state.env_state.cumulative_reward == 0.0
-            assert state.obs.shape == (504, 669, 5)
+            assert state.obs.shape == (151, 669, 5)
 
 
 class TestPositionManagement:
@@ -223,29 +223,36 @@ class TestPositionManagement:
         # Should have closed at least one trade
         assert state.env_state.num_trades > 0
 
-    def test_max_holding_period(self):
-        """Test that positions are forced to close after max holding period"""
-        data_array, data_array_full, norm_stats = create_test_data()
-        env = TradingEnv(data_array, data_array_full, norm_stats, max_holding_days=5)
+    def test_end_of_episode_liquidation(self):
+        """Test that all positions are liquidated at episode end"""
+        # Flat prices so target is never hit
+        num_days = 1000
+        prices = jnp.ones((num_days, 669, 1)) * 100.0
+        data_array = jnp.ones((num_days, 669, 5))
+        data_array = data_array.at[:, :, 0].set(prices[:, :, 0])
+        data_array_full = jnp.ones((num_days, 669, 9))
+        data_array_full = data_array_full.at[:, :, 1].set(prices[:, :, 0])
+        data_array_full = data_array_full.at[:, :, 2].set(prices[:, :, 0])  # High = Close
+        norm_stats = {'mean': jnp.zeros(5), 'std': jnp.ones(5)}
+
+        env = TradingEnv(data_array, data_array_full, norm_stats)
 
         key = random.PRNGKey(0)
         state = env.reset(key)
 
-        # Open position with very high sale target (won't hit)
         action = jnp.ones((108, 2))
         action = action.at[:, 0].set(5.0)
-        action = action.at[:, 1].set(50.0)  # High target
+        action = action.at[:, 1].set(50.0)  # High target, never hit on flat prices
 
-        initial_trades = 0
-        steps = 0
-
-        # Run until trade completes or timeout
-        while state.env_state.num_trades == initial_trades and steps < 30:
+        # Run entire episode
+        while not state.done:
             state = env.step(state, action)
-            steps += 1
 
-        # Position should have closed due to max holding
-        assert state.env_state.num_trades > 0
+        assert state.done
+        assert state.env_state.num_active_positions == 0, \
+            "All positions should be liquidated at episode end"
+        assert state.env_state.num_trades > 0, \
+            "At least one position should have been opened and liquidated"
 
 
 class TestJAXFeatures:
@@ -265,7 +272,7 @@ class TestJAXFeatures:
             return env.step(state, action)
 
         new_state = jitted_step(state, action)
-        assert new_state.obs.shape == (504, 669, 5)
+        assert new_state.obs.shape == (151, 669, 5)
 
     def test_env_reset_is_jittable(self):
         """Test that reset function can be JIT compiled"""
@@ -278,7 +285,7 @@ class TestJAXFeatures:
 
         key = random.PRNGKey(0)
         state = jitted_reset(key)
-        assert state.obs.shape == (504, 669, 5)
+        assert state.obs.shape == (151, 669, 5)
 
     def test_env_is_vmappable(self):
         """Test that environment can be vectorized"""
@@ -292,7 +299,7 @@ class TestJAXFeatures:
         # Vectorized reset
         states = jax.vmap(env.reset)(keys)
 
-        assert states.obs.shape == (batch_size, 504, 669, 5)
+        assert states.obs.shape == (batch_size, 151, 669, 5)
         assert states.reward.shape == (batch_size,)
 
     def test_deterministic_with_same_key(self):
@@ -356,7 +363,7 @@ class TestObservationSpace:
         action = jnp.ones((108, 2))
         for _ in range(10):
             state = env.step(state, action)
-            assert state.obs.shape == (504, 669, 5)
+            assert state.obs.shape == (151, 669, 5)
 
 
 class TestRewardSystem:
@@ -416,139 +423,139 @@ class TestRewardSystem:
 
 
 class TestMonoRules:
-    """Test mono trading rules: multiple buys same stock, 20d since last buy, partial sells"""
+    """Test mono trading rules: multiple buys same stock, 20-trading-day sell
+    restriction, end-of-episode liquidation."""
 
-    def _create_mono_data(self, num_days=500, min_holding=20, max_holding=60):
-        """Create test data for mono (single stock, 1 column)"""
-        key = random.PRNGKey(123)
-        prices = 100.0 + random.normal(key, (num_days, 1)) * 2
+    @staticmethod
+    def _create_mono_env(num_days=500, **env_kwargs):
+        """Create a single-stock env with rising prices."""
+        prices = jnp.linspace(100, 200, num_days).reshape(-1, 1)
         data_array = jnp.ones((num_days, 1, 5))
         data_array = data_array.at[:, :, 0].set(prices)
         data_array_full = jnp.ones((num_days, 1, 9))
-        data_array_full = data_array_full.at[:, :, 1].set(prices)
-        data_array_full = data_array_full.at[:, :, 2].set(prices * 1.05)  # High
-        data_array_full = data_array_full.at[:, :, 0].set(prices * 0.99)  # Open
-        data_array_full = data_array_full.at[:, :, 3].set(prices * 0.98)  # Low
+        data_array_full = data_array_full.at[:, :, 1].set(prices)       # Close
+        data_array_full = data_array_full.at[:, :, 2].set(prices * 1.1) # High (10% above)
+        data_array_full = data_array_full.at[:, :, 0].set(prices * 0.99)
+        data_array_full = data_array_full.at[:, :, 3].set(prices * 0.98)
         norm_stats = {'mean': jnp.zeros(5), 'std': jnp.ones(5)}
-        return data_array, data_array_full, norm_stats
+        defaults = dict(
+            num_investable_stocks=1,
+            investable_start_col=0,
+            max_positions=5,
+            min_holding_period=20,
+        )
+        defaults.update(env_kwargs)
+        env = TradingEnv(data_array, data_array_full, norm_stats, **defaults)
+        return env
 
     def test_mono_can_buy_when_holding(self):
-        """Mono: Agent can buy more of the same stock when already holding"""
-        data_array, data_array_full, norm_stats = self._create_mono_data()
-        env = TradingEnv(
-            data_array, data_array_full, norm_stats,
-            num_investable_stocks=1,
-            investable_start_col=0,
-            max_positions=5,
-        )
+        """Agent can accumulate multiple lots of the same stock."""
+        env = self._create_mono_env()
         key = random.PRNGKey(0)
         state = env.reset(key)
 
-        # Strong buy action (stock 0 only)
-        action = jnp.array([[[5.0, 20.0]]])  # [1, 2]
-        action = jnp.reshape(action, (1, 2))
+        buy_action = jnp.array([[5.0, 20.0]])
 
-        # Step until first position opens
         for _ in range(5):
-            state = env.step(state, action)
+            state = env.step(state, buy_action)
             if state.env_state.num_active_positions >= 1:
                 break
-
         assert state.env_state.num_active_positions >= 1, "First position should open"
 
-        # Keep stepping - should be able to open more positions in same stock
         for _ in range(10):
-            state = env.step(state, action)
+            state = env.step(state, buy_action)
             if state.env_state.num_active_positions >= 2:
                 break
+        assert state.env_state.num_active_positions >= 2, \
+            "Should allow second buy in same stock"
 
-        assert state.env_state.num_active_positions >= 2, (
-            "Mono: should allow second buy in same stock"
-        )
-
-    def test_mono_sell_after_20_days_since_last_buy(self):
-        """Mono: Cannot sell until 20 trading days since last buy"""
-        # Data where price rises so target can be hit
-        num_days = 500
-        prices = jnp.linspace(100, 150, num_days).reshape(-1, 1)
-        data_array = jnp.ones((num_days, 1, 5))
-        data_array = data_array.at[:, :, 0].set(prices)
-        data_array_full = jnp.ones((num_days, 1, 9))
-        data_array_full = data_array_full.at[:, :, 1].set(prices)
-        data_array_full = data_array_full.at[:, :, 2].set(prices * 1.1)  # High above close
-        norm_stats = {'mean': jnp.zeros(5), 'std': jnp.ones(5)}
-
-        env = TradingEnv(
-            data_array, data_array_full, norm_stats,
-            num_investable_stocks=1,
-            investable_start_col=0,
-            min_holding_period=20,
-            max_holding_days=60,
-            max_positions=5,
-        )
+    def test_mono_no_sell_before_20_trading_days(self):
+        """No position can close before 20 trading days since the last buy."""
+        env = self._create_mono_env()
         key = random.PRNGKey(0)
         state = env.reset(key)
 
-        # Low sale target so target hits quickly
-        action = jnp.array([[5.0, 2.0]])  # 2% target
+        buy_action = jnp.array([[5.0, 1.0]])   # 1% target -- easily hit
+        hold_action = jnp.array([[0.0, 1.0]])   # coeff below threshold, no buy
 
-        # Buy on first step, buy again on step 5
-        for step in range(30):
-            if step == 5:
-                action = jnp.array([[5.0, 2.0]])  # Second buy
-            state = env.step(state, action)
-            # Last buy at step 5; can't sell until step 25 (20 days later)
-            if step < 25 and state.env_state.num_trades > 0:
-                # If we closed before step 25, that violates the rule
-                pass  # We're checking no exit before 20d since last buy
+        # Call 0: first buy
+        state = env.step(state, buy_action)
+        assert state.env_state.num_active_positions >= 1
+
+        # Calls 1-4: hold
+        for _ in range(4):
+            state = env.step(state, hold_action)
+
+        # Call 5: second buy (last buy is now at relative step 5)
+        state = env.step(state, buy_action)
+        assert state.env_state.num_active_positions >= 2
+
+        # Calls 6-24 (19 steps): target is already exceeded (high is 10%
+        # above close, target is 1%), but sell window is closed because
+        # < 20 trading days since last buy at step 5.
+        for i in range(19):
+            state = env.step(state, hold_action)
+            assert state.env_state.num_trades == 0, \
+                f"Position sold at step {6 + i} -- before 20 trading days since last buy"
+
+    def test_mono_sell_after_20_trading_days(self):
+        """Positions can close once 20 trading days have passed since last buy."""
+        env = self._create_mono_env()
+        key = random.PRNGKey(0)
+        state = env.reset(key)
+
+        buy_action = jnp.array([[5.0, 1.0]])
+        hold_action = jnp.array([[0.0, 1.0]])
+
+        # Open one position
+        state = env.step(state, buy_action)
+
+        # Advance 20+ trading days with no further buys
+        for _ in range(25):
+            state = env.step(state, hold_action)
             if state.env_state.num_trades > 0:
                 break
 
-        # At least one trade should eventually close (after day 25)
-        assert state.env_state.num_trades >= 0  # May not close in 30 steps
+        assert state.env_state.num_trades > 0, \
+            "Should have sold after 20 trading days since last buy"
 
-    def test_mono_partial_sell(self):
-        """Mono: Can close some positions (partial sell) while keeping others"""
-        # Data with varying prices - some lots hit target, some don't
-        num_days = 400
-        key = random.PRNGKey(99)
-        prices = (100.0 + jnp.cumsum(random.normal(key, (num_days,)) * 2)).reshape(-1, 1)
+    def test_mono_end_of_episode_liquidation(self):
+        """All remaining positions are liquidated at episode end."""
+        # Flat prices so target is never hit
+        num_days = 500
+        prices = jnp.ones((num_days, 1)) * 100.0
         data_array = jnp.ones((num_days, 1, 5))
         data_array = data_array.at[:, :, 0].set(prices)
         data_array_full = jnp.ones((num_days, 1, 9))
         data_array_full = data_array_full.at[:, :, 1].set(prices)
-        data_array_full = data_array_full.at[:, :, 2].set(prices * 1.15)  # High allows target
+        data_array_full = data_array_full.at[:, :, 2].set(prices)  # High = Close
         norm_stats = {'mean': jnp.zeros(5), 'std': jnp.ones(5)}
 
         env = TradingEnv(
             data_array, data_array_full, norm_stats,
             num_investable_stocks=1,
             investable_start_col=0,
-            min_holding_period=5,  # Shorter for test
-            max_holding_days=50,
             max_positions=5,
+            min_holding_period=20,
         )
         key = random.PRNGKey(0)
         state = env.reset(key)
 
-        # Open multiple positions
-        action = jnp.array([[5.0, 10.0]])
-        for _ in range(15):
-            state = env.step(state, action)
-            if state.env_state.num_active_positions >= 2:
-                break
+        buy_action = jnp.array([[5.0, 50.0]])   # 50% target, never hit
+        hold_action = jnp.array([[0.0, 50.0]])
 
-        # Run until at least one closes (partial sell)
-        for _ in range(80):
-            state = env.step(state, action)
-            n = state.env_state.num_active_positions
-            t = state.env_state.num_trades
-            if t >= 1 and n >= 1:
-                # We closed at least one but still have positions = partial sell
-                break
+        # Open a position then hold until episode ends
+        state = env.step(state, buy_action)
+        assert state.env_state.num_active_positions >= 1
 
-        # Partial sell: we had multiple positions, closed some, may have some left
-        assert state.env_state.num_trades >= 0
+        while not state.done:
+            state = env.step(state, hold_action)
+
+        assert state.done
+        assert state.env_state.num_active_positions == 0, \
+            "All positions should be liquidated at episode end"
+        assert state.env_state.num_trades > 0, \
+            "Liquidation should register as a completed trade"
 
 
 @pytest.mark.slow

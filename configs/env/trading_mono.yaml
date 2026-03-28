@@ -1,6 +1,9 @@
 # Mono trading environment (single-stock)
-# Inherits from trading.yaml, overrides for single-column data
-# Rules: allow multiple buys same stock; sell only after 20d since last buy; partial sells OK
+# Rules:
+#   - Agent can buy more of the same stock while holding existing positions
+#   - No sell until 20 trading days since the most recent buy action
+#   - Partial sells allowed (individual lots close independently)
+#   - All remaining positions liquidated at episode end
 
 # Data dimensions (single stock)
 num_columns: 1
@@ -13,24 +16,20 @@ num_features_full: 9
 # Set to null when using pre-sliced single-column data
 column_index: 0
 
-# Episode structure (same as trading)
+# Episode structure
 context_window_days: 151
 trading_period_days: 125
 settlement_period_days: 30
 min_holding_period: 20
-liquidation_window_days: 10
-max_holding_period: 30
 
 # Position limits (multiple lots allowed for same stock)
 max_positions: 10
-max_trades_per_day: 5
 
-# Rewards and penalties (same as trading)
+# Rewards and penalties
 inaction_penalty: 0.0
 coefficient_threshold: 1.0
 hurdle_rate: 0.006
 conviction_scaling_power: 1.25
-forced_exit_penalty_pct: 0.01
 loss_penalty_multiplier: 1.0
 
 # Sale target bounds

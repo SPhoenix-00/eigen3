@@ -6,6 +6,8 @@ All notable changes to Eigen3 are documented here.
 
 ### Added
 
+- **configs/env/trading_mono.yaml**: Single-stock (mono) Hydra overrides: one column, `investable_start_col: 0`, optional `column_index` for slicing a multi-column dataset, `min_holding_period` as the minimum **trading days** since the last buy before any target-based sell, and episode-end liquidation of all open lots.
+- **Mono trading tests** (`tests/unit/test_trading_env.py`): Coverage for multiple buys on the same symbol, 20-trading-day sell restriction after the last buy, target-based sell after the window opens, and end-of-episode liquidation.
 - **EIGEN2_DELTA.md**: Delta document listing Eigen2 vs Eigen3 sync (constants, behavior, file mapping). Use it to align Eigen3 with Eigen2 changes.
 - **configs/env/trading.yaml**: Environment configuration (Eigen2-aligned: 151-day context, 117 columns, holding periods, hurdle rate, observation noise).
 - **load_trading_data()**: Convenience loader that dispatches to `load_eigen2_data` for directories; supports Eigen2-exported npy/npz.
@@ -16,9 +18,9 @@ All notable changes to Eigen3 are documented here.
 - **Data (Eigen2 sync)**:
   - **DataConfig**: Defaults `num_columns=117`, `context_window_days=151`, `normalize=False`; added `validation_days`, `committee_holdout_days`.
   - **create_synthetic_data**: Default `num_columns=117`.
-- **Environment (Eigen2 sync)**:
-  - **TradingEnv**: Defaults `context_window_days=151`, `settlement_period_days=30`, `min_holding_period=20`, `max_holding_days=30`, `investable_start_col=9`, `inaction_penalty=0`; added `hurdle_rate`, `conviction_scaling_power`, `forced_exit_penalty_pct`, `observation_noise_std`, `is_training`; `rng_key` in state for observation noise.
-  - Reward: min/max holding (no exit before 20 days; force exit at 30), hurdle + conviction scaling, forced-exit penalty.
+- **Environment (Eigen2 sync)** (defaults and reward shaping; exit timing superseded by **Changed (mono / TradingEnv semantics)** below):
+  - **TradingEnv**: Defaults `context_window_days=151`, `settlement_period_days=30`, `min_holding_period=20`, `investable_start_col=9`, `inaction_penalty=0`; added `hurdle_rate`, `conviction_scaling_power`, `observation_noise_std`, `is_training`; `rng_key` in state for observation noise.
+  - Reward: hurdle + conviction scaling (and related loss scaling); earlier Eigen2-aligned notes also mentioned max-holding forced exit, since removed.
   - Observation: optional multiplicative noise when `is_training`; support for 1D/2D `norm_stats`.
 - **Models (Eigen2 sync)**:
   - **FeatureExtractor**: Instance normalization before CNN; default `num_columns=117`.
@@ -42,6 +44,12 @@ All notable changes to Eigen3 are documented here.
 - **Train (`scripts/train.py`)**: 10 environment parameters from YAML config were silently ignored; now all forwarded to `TradingEnv` constructor.
 - **Data (`data_loader.py`)**: `StockDataLoader` methods crashed with `TypeError` when `normalize=False` because `norm_stats` was `None`; added identity fallback.
 - **Tests**: All inline `test_*()` functions updated from stale `(504, 669)` to Eigen2-aligned `(151, 117)` dimensions.
+
+### Changed (mono / TradingEnv semantics)
+
+- **TradingEnv**: Dropped `max_holding_days` and `forced_exit_penalty_pct`; there is no intraday forced exit. Each environment step is one **trading day**. Positions may exit when the daily high reaches the target **and** at least `min_holding_period` trading days have passed since the **most recent buy** for that stock (across all active lots). The agent may open additional lots in the same stock while already holding. On the last step of the episode, **all** remaining positions are liquidated at the close (the sell window does not block liquidation).
+- **scripts/train.py**: Stops passing removed constructor arguments; supports `env.column_index` for mono column slicing when loading directory data (see `load_trading_data`).
+- **eigen3/workflows/trading_workflow.py**: Import paths match the vendored EvoRL layout (`evorl.sample_batch`, `evorl.agent.Agent` / `AgentState`).
 
 ---
 
