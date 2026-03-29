@@ -17,6 +17,7 @@ from evorl.envs import Env
 
 from eigen3.config import (
     DEFAULT_CONVICTION_SCALING_POWER,
+    DEFAULT_EPISODE_REWARD_MULTIPLIER,
     DEFAULT_HURDLE_RATE,
     DEFAULT_LOSS_PENALTY_MULTIPLIER,
 )
@@ -44,6 +45,10 @@ class TradingEnvState(PyTreeData):
     total_gain_pct: chex.Array  # scalar float
     days_with_positions: chex.Array  # scalar int
     days_without_positions: chex.Array  # scalar int
+
+    # Episode-level value-add tracking
+    peak_capital_employed: chex.Array  # scalar float – max sum of entry prices across steps
+    total_pnl: chex.Array  # scalar float – cumulative raw dollar PnL (exit − entry)
 
     # RNG for observation noise (Eigen2: multiplicative noise when is_training)
     rng_key: chex.Array = pytree_field(default_factory=lambda: jnp.zeros((2,), dtype=jnp.uint32))
@@ -148,6 +153,7 @@ class TradingEnv(Env):
         observation_noise_std: float = 0.01,
         is_training: bool = True,
         dates_ordinal=None,
+        episode_reward_multiplier: float = DEFAULT_EPISODE_REWARD_MULTIPLIER,
     ):
         """Initialize trading environment.
 
@@ -181,6 +187,8 @@ class TradingEnv(Env):
             is_training: If True, apply observation noise
             dates_ordinal: 1-D int array [num_days] of ``date.toordinal()`` values.
                 When ``None``, defaults to ``arange(num_days)`` (1 row = 1 calendar day).
+            episode_reward_multiplier: Scale factor for the per-episode bonus/penalty
+                (agent PnL vs buy-and-hold benchmark).
         """
         self.data_array = jnp.array(data_array, dtype=jnp.float32)
         self.data_array_full = jnp.array(data_array_full, dtype=jnp.float32)
@@ -214,6 +222,7 @@ class TradingEnv(Env):
         self.conviction_scaling_power = conviction_scaling_power
         self.observation_noise_std = observation_noise_std
         self.is_training = is_training
+        self.episode_reward_multiplier = episode_reward_multiplier
 
         # Calendar-based episode: inclusive span episode_calendar_days on dates_ordinal.
         (
@@ -290,6 +299,8 @@ class TradingEnv(Env):
             total_gain_pct=jnp.array(0.0, dtype=jnp.float32),
             days_with_positions=jnp.array(0, dtype=jnp.int32),
             days_without_positions=jnp.array(0, dtype=jnp.int32),
+            peak_capital_employed=jnp.array(0.0, dtype=jnp.float32),
+            total_pnl=jnp.array(0.0, dtype=jnp.float32),
             rng_key=rng_key,
         )
 
@@ -315,16 +326,21 @@ class TradingEnv(Env):
         """
         env_state = state.env_state
 
+        # Capital employed at start of step (before any closures count toward peak)
+        active_mask = (env_state.positions[:, 5] > 0.5).astype(jnp.float32)
+        capital_employed = jnp.sum(env_state.positions[:, 2] * active_mask)
+        new_peak = jnp.maximum(env_state.peak_capital_employed, capital_employed)
+
         # Count active positions before updates
         had_positions = env_state.num_active_positions > 0
 
         # 1. Update existing positions and collect rewards
-        positions, close_reward, num_wins, num_losses, total_gain, num_trades = self._update_positions(
-            env_state
+        positions, close_reward, num_wins, num_losses, total_gain, num_trades, close_pnl = (
+            self._update_positions(env_state)
         )
 
         # 2. Discretionary market sells (same min-hold rule as target exits)
-        positions, disc_r, dw, dl, dg, dt = self._process_discretionary_sells(
+        positions, disc_r, dw, dl, dg, dt, disc_pnl = self._process_discretionary_sells(
             env_state, positions, action[:, 2]
         )
         close_reward = close_reward + disc_r
@@ -332,6 +348,9 @@ class TradingEnv(Env):
         num_losses = num_losses + dl
         total_gain = total_gain + dg
         num_trades = num_trades + dt
+
+        # Accumulate raw dollar PnL
+        new_total_pnl = env_state.total_pnl + close_pnl + disc_pnl
 
         # 3. Process new action (only during trading period)
         positions, action_reward, position_opened = jax.lax.cond(
@@ -355,17 +374,21 @@ class TradingEnv(Env):
         days_with = env_state.days_with_positions + jax.lax.select(has_positions_now, 1, 0)
         days_without = env_state.days_without_positions + jax.lax.select(~has_positions_now, 1, 0)
 
-        # Total reward for this step
+        # Total per-step reward (trade-level)
         step_reward = close_reward + action_reward + inaction_pen
 
         # 5. Move to next step
         new_step = env_state.current_step + 1
         done = new_step >= env_state.end_step
 
+        # 6. Episode-level bonus/penalty (agent PnL vs buy-and-hold benchmark)
+        episode_bonus = self._compute_episode_bonus(env_state, new_total_pnl, new_peak)
+        step_reward = step_reward + jnp.where(done, episode_bonus, 0.0)
+
         # Split RNG for next step observation noise
         step_key, next_key = jax.random.split(env_state.rng_key)
 
-        # 6. Update state
+        # 7. Update state
         new_env_state = env_state.replace(
             current_step=new_step,
             positions=positions,
@@ -377,6 +400,8 @@ class TradingEnv(Env):
             total_gain_pct=total_gain,
             days_with_positions=days_with,
             days_without_positions=days_without,
+            peak_capital_employed=new_peak,
+            total_pnl=new_total_pnl,
             rng_key=next_key,
         )
 
@@ -456,17 +481,57 @@ class TradingEnv(Env):
             scaled_coef * net_gain_pct * self.loss_penalty_multiplier,
         )
 
+    def _compute_episode_bonus(
+        self,
+        env_state: TradingEnvState,
+        total_pnl: chex.Array,
+        peak_capital: chex.Array,
+    ) -> chex.Array:
+        """Per-episode reward: agent PnL vs buy-and-hold benchmark.
+
+        The benchmark assumes the peak capital employed during the episode was
+        invested equally across all investable stocks at episode start.
+        """
+        start_step = env_state.start_step
+        current_step = env_state.current_step
+
+        start_prices = jax.lax.dynamic_slice(
+            self.data_array_full[:, :, 1],
+            (start_step, self.investable_start_col),
+            (1, self.num_investable_stocks),
+        ).squeeze(0)
+        end_prices = jax.lax.dynamic_slice(
+            self.data_array_full[:, :, 1],
+            (current_step, self.investable_start_col),
+            (1, self.num_investable_stocks),
+        ).squeeze(0)
+
+        valid = (
+            jnp.isfinite(start_prices)
+            & jnp.isfinite(end_prices)
+            & (start_prices > 0)
+        )
+        returns = jnp.where(
+            valid, (end_prices - start_prices) / start_prices, 0.0
+        )
+        n_valid = jnp.maximum(jnp.sum(valid.astype(jnp.float32)), 1.0)
+        avg_return = jnp.sum(returns) / n_valid
+
+        benchmark_pnl = peak_capital * avg_return
+        return (total_pnl - benchmark_pnl) * self.episode_reward_multiplier
+
     def _update_positions(
         self,
         env_state: TradingEnvState
-    ) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array]:
+    ) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array]:
         """Update all positions and close if necessary
 
         Args:
             env_state: Current trading state
 
         Returns:
-            Tuple of (new_positions, total_reward, num_wins, num_losses, total_gain_pct, num_trades)
+            Tuple of (new_positions, total_reward, num_wins, num_losses,
+                       total_gain_pct, num_trades, dollar_pnl)
         """
         positions = env_state.positions
 
@@ -478,21 +543,15 @@ class TradingEnv(Env):
             coefficient = position[4]
             is_active = position[5]
 
-            # Skip inactive positions
             def inactive_branch():
-                return position, 0.0, 0, 0, 0.0
+                return position, 0.0, 0, 0, 0.0, 0.0
 
             def active_branch():
-                # No sell until >= min_holding_period calendar days since the most
-                # recent buy for this stock (across all active lots).
-                # `positions` is the pre-update snapshot, closed over from
-                # the outer scope -- JAX treats it as a constant in vmap.
                 same_stock_active = (positions[:, 0] == stock_idx) & (positions[:, 5] > 0.5)
                 last_buy_step = jnp.max(jnp.where(same_stock_active, positions[:, 1], -1))
                 cal_days = self._calendar_gap(env_state.current_step, last_buy_step)
                 can_sell_window = cal_days >= self.min_holding_period
 
-                # Get current price for the stock
                 actual_col_idx = self.investable_start_col + stock_idx
                 current_data = self.data_array_full[env_state.current_step, actual_col_idx]
 
@@ -505,8 +564,6 @@ class TradingEnv(Env):
                 exit_on_target = can_sell_window & target_hit
                 should_exit = (~is_valid) | is_last_step | exit_on_target
 
-                # Exit at target when target is hit; at current price for
-                # liquidation; at entry price for invalid-data exits.
                 exit_price = jax.lax.select(
                     exit_on_target,
                     target_price,
@@ -521,16 +578,15 @@ class TradingEnv(Env):
                     0.0,
                 )
 
-                # Update position (close if should_exit)
                 new_position = jax.lax.select(
                     should_exit,
-                    jnp.zeros_like(position),  # Close position
-                    position  # Keep position
+                    jnp.zeros_like(position),
+                    position
                 )
 
-                # Win/loss tracking
                 win = jax.lax.select(should_exit & (gain_pct > 0), 1, 0)
                 loss = jax.lax.select(should_exit & (gain_pct <= 0), 1, 0)
+                dollar_pnl = jax.lax.select(should_exit, exit_price - entry_price, 0.0)
 
                 return (
                     new_position,
@@ -538,6 +594,7 @@ class TradingEnv(Env):
                     win,
                     loss,
                     jax.lax.select(should_exit, gain_pct, 0.0),
+                    dollar_pnl,
                 )
 
             return jax.lax.cond(
@@ -546,9 +603,8 @@ class TradingEnv(Env):
                 inactive_branch
             )
 
-        # Vectorized update across all positions
         results = jax.vmap(update_single_position)(positions)
-        new_positions, rewards, wins, losses, gains = results
+        new_positions, rewards, wins, losses, gains, pnls = results
 
         return (
             new_positions,
@@ -556,7 +612,8 @@ class TradingEnv(Env):
             env_state.num_wins + jnp.sum(wins),
             env_state.num_losses + jnp.sum(losses),
             env_state.total_gain_pct + jnp.sum(gains),
-            env_state.num_trades + jnp.sum(jnp.where(rewards != 0, 1, 0))
+            env_state.num_trades + jnp.sum(jnp.where(rewards != 0, 1, 0)),
+            jnp.sum(pnls),
         )
 
     def _discretionary_close_for_stock(
@@ -565,7 +622,7 @@ class TradingEnv(Env):
         positions: chex.Array,
         close_frac: chex.Array,
         stock_idx: chex.Array,
-    ) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array]:
+    ) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array]:
         """Close up to round(close_frac * n_eligible) lots (FIFO) for one stock at market."""
         same_s = (positions[:, 0].astype(jnp.int32) == stock_idx) & (positions[:, 5] > 0.5)
         has = jnp.any(same_s)
@@ -582,7 +639,7 @@ class TradingEnv(Env):
         order = jnp.argsort(sort_key)
 
         def close_body(carry, i):
-            pos, r_acc, closed, w_acc, l_acc, g_acc, t_acc = carry
+            pos, r_acc, closed, w_acc, l_acc, g_acc, t_acc, pnl_acc = carry
             idx = order[i].astype(jnp.int32)
             was_elig = eligible[idx]
             still = pos[idx, 5] > 0.5
@@ -603,6 +660,7 @@ class TradingEnv(Env):
             l_add = jnp.where(do & (gain_pct <= 0), jnp.int32(1), jnp.int32(0))
             g_add = jnp.where(do, gain_pct, 0.0)
             t_add = jnp.where(do, jnp.int32(1), jnp.int32(0))
+            pnl_add = jnp.where(do, exit_price - entry_price, 0.0)
 
             new_row = jnp.zeros(6, dtype=jnp.float32)
             pos_new = pos.at[idx].set(jnp.where(do, new_row, pos[idx]))
@@ -616,6 +674,7 @@ class TradingEnv(Env):
                 l_acc + l_add,
                 g_acc + g_add,
                 t_acc + t_add,
+                pnl_acc + pnl_add,
             ), None
 
         init_inner = (
@@ -626,24 +685,25 @@ class TradingEnv(Env):
             jnp.array(0, dtype=jnp.int32),
             jnp.array(0.0, dtype=jnp.float32),
             jnp.array(0, dtype=jnp.int32),
+            jnp.array(0.0, dtype=jnp.float32),
         )
         idx_range = jnp.arange(self.max_positions, dtype=jnp.int32)
-        (pos_out, r, _closed, w, l, g, t), _ = jax.lax.scan(close_body, init_inner, idx_range)
-        return pos_out, r, w, l, g, t
+        (pos_out, r, _closed, w, l, g, t, pnl), _ = jax.lax.scan(close_body, init_inner, idx_range)
+        return pos_out, r, w, l, g, t, pnl
 
     def _process_discretionary_sells(
         self,
         env_state: TradingEnvState,
         positions: chex.Array,
         close_fractions: chex.Array,
-    ) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array]:
+    ) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array]:
         """Apply per-stock discretionary market sells (after automatic position updates)."""
 
         def for_one_stock(carry, s):
-            pos, r_tot, w_tot, l_tot, g_tot, t_tot = carry
+            pos, r_tot, w_tot, l_tot, g_tot, t_tot, pnl_tot = carry
             s_int = s.astype(jnp.int32)
             frac = jnp.clip(close_fractions[s_int], 0.0, 1.0)
-            npos, rr, dw, dl, dg, dt = self._discretionary_close_for_stock(
+            npos, rr, dw, dl, dg, dt, dpnl = self._discretionary_close_for_stock(
                 env_state, pos, frac, s_int
             )
             return (
@@ -653,6 +713,7 @@ class TradingEnv(Env):
                 l_tot + dl,
                 g_tot + dg,
                 t_tot + dt,
+                pnl_tot + dpnl,
             ), None
 
         init = (
@@ -662,10 +723,11 @@ class TradingEnv(Env):
             jnp.array(0, dtype=jnp.int32),
             jnp.array(0.0, dtype=jnp.float32),
             jnp.array(0, dtype=jnp.int32),
+            jnp.array(0.0, dtype=jnp.float32),
         )
         stock_indices = jnp.arange(self.num_investable_stocks, dtype=jnp.int32)
-        (positions_out, r, w, l, g, t), _ = jax.lax.scan(for_one_stock, init, stock_indices)
-        return positions_out, r, w, l, g, t
+        (positions_out, r, w, l, g, t, pnl), _ = jax.lax.scan(for_one_stock, init, stock_indices)
+        return positions_out, r, w, l, g, t, pnl
 
     def _process_action(
         self,

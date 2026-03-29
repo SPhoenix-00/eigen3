@@ -12,6 +12,7 @@ from eigen3.data import load_trading_data, create_synthetic_data
 from eigen3.data.splits import compute_train_val_holdout_split, slice_trading_timeline
 from eigen3.config import (
     DEFAULT_CONVICTION_SCALING_POWER,
+    DEFAULT_EPISODE_REWARD_MULTIPLIER,
     DEFAULT_HURDLE_RATE,
     DEFAULT_LOSS_PENALTY_MULTIPLIER,
 )
@@ -168,6 +169,9 @@ def main(cfg: DictConfig) -> None:
             observation_noise_std=_env_cfg("observation_noise_std", 0.01),
             is_training=is_training,
             dates_ordinal=dates_ord,
+            episode_reward_multiplier=_env_cfg(
+                "episode_reward_multiplier", DEFAULT_EPISODE_REWARD_MULTIPLIER
+            ),
         )
 
     env = _make_env(train_obs, train_full, dates_train, is_training=True)

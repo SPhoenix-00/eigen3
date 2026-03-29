@@ -13,3 +13,6 @@ DEFAULT_CONVICTION_SCALING_POWER: float = 1.0
 
 # > 1.0 magnifies negative net PnL in the reward (after hurdle)
 DEFAULT_LOSS_PENALTY_MULTIPLIER: float = 1.25
+
+# Scales the per-episode reward/penalty (agent PnL vs buy-and-hold benchmark)
+DEFAULT_EPISODE_REWARD_MULTIPLIER: float = 1.0
