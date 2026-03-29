@@ -36,56 +36,26 @@ class BiLSTM(nn.Module):
         Returns:
             Output tensor [batch, time_steps, 2*hidden_size]
         """
-        batch_size, time_steps, input_size = x.shape
-
-        # Initialize carry states for forward and backward LSTMs
-        # Flax LSTM uses (c, h) as carry
-        carry_shape = (batch_size, self.hidden_size)
-
-        # Process with stacked bidirectional LSTM layers
+        # Stacked bidirectional LSTM using nn.RNN (Flax-recommended; avoids lax.scan + Module leaks)
         hidden = x
 
         for layer_idx in range(self.num_layers):
-            # Forward LSTM
-            lstm_cell_fwd = nn.LSTMCell(name=f'lstm_fwd_layer{layer_idx}')
-
-            def fwd_scan_fn(carry, x_t):
-                carry, y = lstm_cell_fwd(carry, x_t)
-                return carry, y
-
-            # Initialize forward carry
-            carry_fwd = lstm_cell_fwd.initialize_carry(
-                jax.random.PRNGKey(0),
-                (batch_size,),
-                self.hidden_size
+            fwd = nn.RNN(
+                nn.LSTMCell(features=self.hidden_size),
+                name=f'lstm_fwd_layer{layer_idx}',
+            )
+            bwd = nn.RNN(
+                nn.LSTMCell(features=self.hidden_size),
+                name=f'lstm_bwd_layer{layer_idx}',
             )
 
-            # Scan forward through time
-            _, hidden_fwd = jax.lax.scan(fwd_scan_fn, carry_fwd, jnp.transpose(hidden, (1, 0, 2)))
-            hidden_fwd = jnp.transpose(hidden_fwd, (1, 0, 2))  # [batch, time, hidden]
+            hidden_fwd = fwd(hidden)
+            hidden_rev = hidden[:, ::-1, :]
+            hidden_bwd_rev = bwd(hidden_rev)
+            hidden_bwd = hidden_bwd_rev[:, ::-1, :]
 
-            # Backward LSTM
-            lstm_cell_bwd = nn.LSTMCell(name=f'lstm_bwd_layer{layer_idx}')
-
-            def bwd_scan_fn(carry, x_t):
-                carry, y = lstm_cell_bwd(carry, x_t)
-                return carry, y
-
-            # Initialize backward carry
-            carry_bwd = lstm_cell_bwd.initialize_carry(
-                jax.random.PRNGKey(0),
-                (batch_size,),
-                self.hidden_size
-            )
-
-            # Scan backward through time (reverse the sequence)
-            _, hidden_bwd = jax.lax.scan(bwd_scan_fn, carry_bwd, jnp.transpose(hidden[:, ::-1], (1, 0, 2)))
-            hidden_bwd = jnp.transpose(hidden_bwd[::-1], (1, 0, 2))  # [batch, time, hidden], unreversed
-
-            # Concatenate forward and backward
             hidden = jnp.concatenate([hidden_fwd, hidden_bwd], axis=-1)  # [batch, time, 2*hidden]
 
-            # Apply dropout between layers (except last layer)
             if layer_idx < self.num_layers - 1 and self.dropout_rate > 0:
                 hidden = nn.Dropout(self.dropout_rate, deterministic=not train)(hidden)
 
@@ -105,7 +75,7 @@ class FeatureExtractor(nn.Module):
     Synced with Eigen2: Instance Norm before CNN; default 117 columns.
     """
     num_columns: int = 117  # Eigen2 TOTAL_COLUMNS (skinny)
-    num_features: int = 5  # [close, RSI, MACD_signal, TRIX, diff20DMA]
+    num_features: int = 5  # Eigen2: [close, RSI, MACD_signal, TRIX, diff20DMA]; mono table: 1
     cnn_filters: int = 32
     cnn_kernel_size: int = 3
     lstm_hidden_size: int = 128

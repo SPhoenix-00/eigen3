@@ -28,7 +28,6 @@ class Actor(nn.Module):
     # Architecture parameters (Eigen2: INVESTABLE_START_COL=9, 108 stocks)
     num_investable_stocks: int = 108
     investable_start_col: int = 9
-    investable_end_col: int = 116  # Inclusive (slice 9:117 = 108 columns)
     actor_hidden_dims: Tuple[int, int, int] = (256, 128, 64)
 
     # Sale target range (Eigen2: MIN/MAX_SALE_TARGET)
@@ -38,6 +37,7 @@ class Actor(nn.Module):
     # Feature extraction parameters (Eigen2: 117 columns)
     num_columns: int = 117
     num_features: int = 5
+    column_chunk_size: int = 64
 
     # Attention parameters
     use_attention: bool = True
@@ -53,6 +53,7 @@ class Actor(nn.Module):
         self.feature_extractor = FeatureExtractor(
             num_columns=self.num_columns,
             num_features=self.num_features,
+            column_chunk_size=self.column_chunk_size,
             use_remat=self.use_remat,
         )
 
@@ -234,9 +235,10 @@ class Actor(nn.Module):
 
             context_processed = jnp.expand_dims(context_processed, axis=1)  # [batch, 1, actor_hidden_dims[1]]
 
-        # Extract investable stock features (Eigen2: columns 9-116 inclusive = 108 stocks)
-        investable_features = features[:, self.investable_start_col:self.investable_end_col+1, :]
-        # [batch, 108, lstm_output_size]
+        # Investable slice: contiguous columns [start, start + num_investable - 1]
+        inv_end = self.investable_start_col + self.num_investable_stocks - 1
+        investable_features = features[:, self.investable_start_col : inv_end + 1, :]
+        # [batch, num_investable_stocks, lstm_output_size]
 
         # Process investable stocks (with checkpointing)
         if train and self.use_remat:

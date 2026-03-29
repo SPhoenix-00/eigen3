@@ -27,11 +27,11 @@ class TestSyntheticData:
         assert isinstance(data_obs, jnp.ndarray)
         assert isinstance(data_full, jnp.ndarray)
 
-        # Check normalization stats
+        # Check normalization stats (per-column, per-feature; matches env / npy identity norm)
         assert 'mean' in norm_stats
         assert 'std' in norm_stats
-        assert norm_stats['mean'].shape == (5,)
-        assert norm_stats['std'].shape == (5,)
+        assert norm_stats['mean'].shape == (100, 5)
+        assert norm_stats['std'].shape == (100, 5)
 
     def test_synthetic_data_deterministic(self):
         """Test that same seed produces same data"""

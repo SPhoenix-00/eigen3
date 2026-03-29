@@ -1,43 +1,34 @@
-# Mono trading environment (single-stock)
-# Rules:
-#   - Agent can buy more of the same stock while holding existing positions
-#   - No sell until 20 trading days since the most recent buy action
-#   - Partial sells allowed (individual lots close independently)
-#   - All remaining positions liquidated at episode end
+# Mono table: A=date, B=price (tradable, channel 0), C–S = 17 context → 18 channels, F=1
+# Override data_path to your PKL/CSV.
 
-# Data dimensions (single stock)
-num_columns: 1
-num_investable_stocks: 1
-investable_start_col: 0
-num_features_obs: 5
-num_features_full: 9
+defaults:
+  - trading
 
-# Column to use when loading multi-column data (0 = first column)
-# Set to null when using pre-sliced single-column data
-column_index: 0
-
-# Episode structure
 context_window_days: 151
 trading_period_days: 125
 settlement_period_days: 30
 min_holding_period: 20
 
-# Position limits (multiple lots allowed for same stock)
-max_positions: 10
+num_columns: 18
+num_features_obs: 1
+num_features_full: 9
 
-# Rewards and penalties
+num_investable_stocks: 1
+investable_start_col: 0
+
+max_positions: 10
 inaction_penalty: 0.0
 coefficient_threshold: 1.0
+min_sale_target: 10.0
+max_sale_target: 50.0
 hurdle_rate: 0.006
 conviction_scaling_power: 1.25
 loss_penalty_multiplier: 1.0
-
-# Sale target bounds
-min_sale_target: 10.0
-max_sale_target: 50.0
-
-# Observation noise
 observation_noise_std: 0.01
 
-# Data path (override via CLI)
-data_path: data/raw/stock_data.pkl
+# Mono file load (see eigen3.data.load_mono_table)
+mono_num_channels: 18
+mono_csv_header: 0
+
+# Point at your processed table (pickle or CSV)
+data_path: Eigen3_Processed_OUTPUT.pkl

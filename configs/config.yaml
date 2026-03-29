@@ -2,7 +2,7 @@
 
 defaults:
   - agent: trading_erl
-  - env: trading
+  - env: trading_mono
   - logging: default
   - _self_
 

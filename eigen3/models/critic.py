@@ -32,6 +32,7 @@ class Critic(nn.Module):
     # Feature extraction parameters (Eigen2: 117 columns)
     num_columns: int = 117
     num_features: int = 5
+    column_chunk_size: int = 64
 
     # Attention parameters
     use_attention: bool = False  # Self-attention (not commonly used)
@@ -47,6 +48,7 @@ class Critic(nn.Module):
         self.feature_extractor = FeatureExtractor(
             num_columns=self.num_columns,
             num_features=self.num_features,
+            column_chunk_size=self.column_chunk_size,
             use_remat=self.use_remat,
         )
 
@@ -147,6 +149,7 @@ class DoubleCritic(nn.Module):
     # Feature extraction parameters (Eigen2: 117 columns)
     num_columns: int = 117
     num_features: int = 5
+    column_chunk_size: int = 64
 
     # Attention parameters
     use_attention: bool = False
@@ -180,6 +183,7 @@ class DoubleCritic(nn.Module):
             critic_hidden_dims=self.critic_hidden_dims,
             num_columns=self.num_columns,
             num_features=self.num_features,
+            column_chunk_size=self.column_chunk_size,
             use_attention=self.use_attention,
             attention_heads=self.attention_heads,
             dropout_rate=self.dropout_rate,
@@ -194,6 +198,7 @@ class DoubleCritic(nn.Module):
             critic_hidden_dims=self.critic_hidden_dims,
             num_columns=self.num_columns,
             num_features=self.num_features,
+            column_chunk_size=self.column_chunk_size,
             use_attention=self.use_attention,
             attention_heads=self.attention_heads,
             dropout_rate=self.dropout_rate,

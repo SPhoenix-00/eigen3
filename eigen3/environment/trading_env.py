@@ -144,20 +144,21 @@ class TradingEnv(Env):
     def obs_space(self):
         """Observation space"""
         from evorl.envs import Box
-        return Box(
-            low=-jnp.inf,
-            high=jnp.inf,
-            shape=(self.context_window_days, self.data_array.shape[1], self.data_array.shape[2])
-        )
+        shp = (self.context_window_days, self.data_array.shape[1], self.data_array.shape[2])
+        return Box(low=jnp.full(shp, -jnp.inf), high=jnp.full(shp, jnp.inf))
 
     @property
     def action_space(self):
         """Action space"""
         from evorl.envs import Box
+        shp = (self.num_investable_stocks, 2)
         return Box(
-            low=jnp.array([[0.0, self.min_sale_target]]),
-            high=jnp.array([[jnp.inf, self.max_sale_target]]),
-            shape=(self.num_investable_stocks, 2)
+            low=jnp.broadcast_to(
+                jnp.array([0.0, self.min_sale_target], dtype=jnp.float32), shp
+            ),
+            high=jnp.broadcast_to(
+                jnp.array([jnp.inf, self.max_sale_target], dtype=jnp.float32), shp
+            ),
         )
 
     def reset(self, key: chex.PRNGKey) -> EnvState:

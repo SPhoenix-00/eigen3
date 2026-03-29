@@ -91,7 +91,9 @@ pip install -e ".[dev]"
 
 ### 1. Prepare Data
 
-Data uses the Eigen2-compatible schema (117 columns, 5 observation features, 9 full features). Load from a directory containing `data_array.npy` and `data_array_full.npy`, or use synthetic data:
+#### Eigen2-style bundle (multi-stock)
+
+Schema: 117 columns, 5 observation features, 9 full features. Load from a directory containing `data_array.npy` and `data_array_full.npy`, or use synthetic data:
 
 ```python
 from eigen3.data import load_trading_data, create_synthetic_data
@@ -99,20 +101,37 @@ from eigen3.data import load_trading_data, create_synthetic_data
 # From Eigen2-exported directory
 data_array, data_array_full, norm_stats = load_trading_data("data/raw")
 
-# Or synthetic (117 columns, identity norm)
+# Or synthetic (117 columns, F=5, identity norm)
 data_array, data_array_full, norm_stats = create_synthetic_data(
-    num_days=2000, num_columns=117, seed=42
+    num_days=2000, num_columns=117, num_features_obs=5, seed=42
 )
 ```
 
+Use Hydra **`env=trading`** (override the default) for this layout.
+
+#### Mono spreadsheet (single tradable price + context)
+
+Table layout: **column A = date**, **B = price** (sole tradable series; P&L uses this channel), **C–S = 17 context columns** → **18 numeric channels**, **one feature per channel (F=1)**.
+
+- Save as **`.csv`** (date in first column) or **`.pkl`** (either 19 columns with date first, or 18 columns with date as the index).
+- `load_trading_data` detects `.pkl` / `.csv` files and returns shapes **`[T, 18, 1]`** and **`[T, 18, 9]`** (only channel 0 is filled for reward OHLC-style indices; high equals close when no intraday bar).
+- Implementation: [`eigen3/data/mono_loader.py`](eigen3/data/mono_loader.py).
+
+Default Hydra env is **`trading_mono`** ([`configs/env/trading_mono.yaml`](configs/env/trading_mono.yaml)). Set `env.data_path` to your file (pickle files are gitignored by default).
+
 ### 2. Train Model
 
-```bash
-# Using Hydra configuration
-python scripts/train.py agent=trading_erl
+From the repository root, ensure the package is importable (`pip install -e .` or `PYTHONPATH=.`) then:
 
-# With custom parameters
-python scripts/train.py agent=trading_erl pop_size=32 seed=42
+```bash
+# Default: env=trading_mono (mono PKL/CSV or synthetic if path missing)
+python scripts/train.py
+
+# Legacy Eigen2 npy bundle
+python scripts/train.py env=trading env.data_path=data/raw
+
+# Overrides
+python scripts/train.py env.data_path=path/to/table.pkl agent=trading_erl seed=42
 ```
 
 ### 3. Evaluate Model
@@ -126,7 +145,9 @@ python scripts/evaluate.py checkpoint_path=checkpoints/best_model.pkl
 The project uses [Hydra](https://hydra.cc/) for configuration management. Configuration files are in `configs/`:
 
 - `configs/agent/trading_erl.yaml` - Main training configuration
-- `configs/env/trading.yaml` - Environment parameters
+- `configs/env/trading.yaml` - Eigen2-style environment (117 cols, F=5, 108 investable)
+- `configs/env/trading_mono.yaml` - Mono table (18 channels, F=1, one investable)
+- `configs/config.yaml` - Defaults include `env: trading_mono`
 - `configs/logging.yaml` - Logging settings
 
 Example configuration override:
@@ -168,6 +189,9 @@ pytest tests/
 
 # Unit tests only
 pytest tests/unit/
+
+# Mono loader and F=1 shapes
+pytest tests/unit/test_mono_loader.py -q
 
 # Integration tests
 pytest tests/integration/

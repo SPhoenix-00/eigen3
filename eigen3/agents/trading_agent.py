@@ -333,8 +333,13 @@ def test_trading_agent():
     # Create dummy spaces
     from evorl.envs import Box
 
-    obs_space = Box(low=-jnp.inf, high=jnp.inf, shape=(151, 117, 5))
-    action_space = Box(low=0.0, high=jnp.inf, shape=(108, 2))
+    oshp = (151, 117, 5)
+    obs_space = Box(low=jnp.full(oshp, -jnp.inf), high=jnp.full(oshp, jnp.inf))
+    ash = (108, 2)
+    action_space = Box(
+        low=jnp.broadcast_to(jnp.array([0.0, 10.0], dtype=jnp.float32), ash),
+        high=jnp.broadcast_to(jnp.array([jnp.inf, 50.0], dtype=jnp.float32), ash),
+    )
 
     # Initialize agent
     key = random.PRNGKey(0)

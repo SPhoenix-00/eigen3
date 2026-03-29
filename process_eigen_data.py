@@ -1,6 +1,11 @@
 """Process single-instrument CSV: compute technical indicators, output
 production-ready CSV and PKL.
 
+**Master training table layout** (separate from this script): column A = date,
+B = price (tradable), C–S = 17 context columns → use ``load_mono_table`` /
+``env=trading_mono`` with F=1. This script instead reads fixed columns B, D, AF
+and emits 18 engineered indicator columns.
+
 Replicates the exact Eigen2 VBA indicator calculations for three base series
 extracted from the input CSV:
   - Close price  (Column B)

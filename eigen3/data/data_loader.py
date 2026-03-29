@@ -11,6 +11,8 @@ import numpy as np
 import jax.numpy as jnp
 import pandas as pd
 
+from eigen3.data.mono_loader import MONO_DEFAULT_NUM_CHANNELS, load_mono_table
+
 
 @dataclass
 class DataConfig:
@@ -413,6 +415,7 @@ class StockDataLoader:
 def create_synthetic_data(
     num_days: int = 1000,
     num_columns: int = 117,
+    num_features_obs: int = 5,
     seed: int = 42,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:
     """Create synthetic stock data for testing
@@ -420,6 +423,7 @@ def create_synthetic_data(
     Args:
         num_days: Number of trading days
         num_columns: Number of stock columns
+        num_features_obs: Observation feature depth F (Eigen2: 5; mono table: 1)
         seed: Random seed
 
     Returns:
@@ -437,23 +441,22 @@ def create_synthetic_data(
         returns = np.random.randn(num_columns) * 0.02 + 0.0001  # 2% daily vol, small positive drift
         prices[day] = prices[day - 1] * (1 + returns)
 
-    # Create observation features
-    data_obs = np.zeros((num_days, num_columns, 5))
-    data_obs[:, :, 0] = prices  # Close prices
+    vol = np.random.lognormal(10, 1, (num_days, num_columns))
+    rets = np.zeros((num_days, num_columns))
+    rets[1:] = (prices[1:] - prices[:-1]) / np.maximum(prices[:-1], 1e-8)
+    volat = np.abs(np.random.randn(num_days, num_columns) * 0.01)
+    intra = np.random.randn(num_days, num_columns) * 0.005
 
-    # Volume (random)
-    data_obs[:, :, 1] = np.random.lognormal(10, 1, (num_days, num_columns))
-
-    # Returns
-    returns = np.zeros((num_days, num_columns))
-    returns[1:] = (prices[1:] - prices[:-1]) / prices[:-1]
-    data_obs[:, :, 2] = returns
-
-    # Volatility (random)
-    data_obs[:, :, 3] = np.abs(np.random.randn(num_days, num_columns) * 0.01)
-
-    # Intraday return (random)
-    data_obs[:, :, 4] = np.random.randn(num_days, num_columns) * 0.005
+    data_obs = np.zeros((num_days, num_columns, num_features_obs))
+    data_obs[:, :, 0] = prices
+    if num_features_obs >= 2:
+        data_obs[:, :, 1] = vol
+    if num_features_obs >= 3:
+        data_obs[:, :, 2] = rets
+    if num_features_obs >= 4:
+        data_obs[:, :, 3] = volat
+    if num_features_obs >= 5:
+        data_obs[:, :, 4] = intra
 
     # Create full features (OHLC + volume + derived)
     data_full = np.zeros((num_days, num_columns, 9))
@@ -461,16 +464,18 @@ def create_synthetic_data(
     data_full[:, :, 1] = prices  # Close
     data_full[:, :, 2] = prices * (1 + np.abs(np.random.randn(num_days, num_columns)) * 0.01)  # High
     data_full[:, :, 3] = prices * (1 - np.abs(np.random.randn(num_days, num_columns)) * 0.01)  # Low
-    data_full[:, :, 4] = data_obs[:, :, 1]  # Volume
-    data_full[:, :, 5] = data_obs[:, :, 2]  # Returns
-    data_full[:, :, 6] = data_obs[:, :, 3]  # Volatility
+    if num_features_obs >= 2:
+        data_full[:, :, 4] = data_obs[:, :, 1]  # Volume
+    if num_features_obs >= 3:
+        data_full[:, :, 5] = data_obs[:, :, 2]  # Returns
+    if num_features_obs >= 4:
+        data_full[:, :, 6] = data_obs[:, :, 3]  # Volatility
     data_full[:, :, 7] = np.random.randn(num_days, num_columns) * 0.005  # High-Open
     data_full[:, :, 8] = np.random.randn(num_days, num_columns) * 0.005  # Open-Low
 
-    # Normalization stats
     norm_stats = {
-        'mean': jnp.zeros(5),
-        'std': jnp.ones(5),
+        'mean': jnp.zeros((num_columns, num_features_obs), dtype=jnp.float32),
+        'std': jnp.ones((num_columns, num_features_obs), dtype=jnp.float32),
     }
 
     # Convert to JAX
@@ -550,24 +555,34 @@ def load_trading_data(
     filepath: str,
     use_identity_norm: bool = True,
     column_index: Optional[int] = None,
+    mono_num_channels: int = MONO_DEFAULT_NUM_CHANNELS,
+    mono_csv_header: Optional[int] = 0,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:
-    """Load trading data for Eigen3 (Eigen2-compatible schema).
+    """Load trading data for Eigen3.
 
-    Dispatches to load_eigen2_data when path is a directory containing
-    data_array.npy / data_array_full.npy. Returns (data_obs, data_full, norm_stats)
-    with shapes [T, num_columns, 5], [T, num_columns, 9], and dict with 'mean'/'std'.
-    Eigen2 skinny dataset: 117 columns.
+    - **Directory** with ``data_array.npy`` / ``data_array_full.npy``: Eigen2-style arrays.
+    - **``.pkl`` / ``.csv``** file: mono spreadsheet layout (see :func:`load_mono_table`).
 
     Args:
-        filepath: Path to data directory (with data_array.npy, data_array_full.npy)
-        use_identity_norm: If True, use identity norm (Eigen2 default)
-        column_index: If set, slice to single column (for mono/single-stock mode).
-            Result shapes: [T, 1, 5], [T, 1, 9].
+        filepath: Npy bundle directory or mono ``.pkl`` / ``.csv`` path
+        use_identity_norm: For npy loads, identity norm when True
+        column_index: For npy only: slice to one column
+        mono_num_channels: Mono file: number of series (default 18)
+        mono_csv_header: Mono CSV: ``pd.read_csv(..., header=...)``
 
     Returns:
         Tuple of (data_obs, data_full, norm_stats)
     """
     path = Path(filepath)
+    if path.is_file() and path.suffix.lower() in (".pkl", ".pickle", ".csv"):
+        if column_index is not None:
+            raise ValueError("column_index applies only to npy directory loads, not mono table files")
+        return load_mono_table(
+            str(path),
+            num_channels=mono_num_channels,
+            csv_header=mono_csv_header,
+        )
+
     if path.is_dir():
         data_obs, data_full, norm_stats = load_eigen2_data(str(path), use_identity_norm)
     elif path.suffix == '.npy' and path.parent.exists():

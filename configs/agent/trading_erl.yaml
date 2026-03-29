@@ -43,7 +43,8 @@ champion_injection: true  # Inject all-time best validation agent
 replay_buffer_size: 100000
 warmup_episodes: 10  # Fill buffer before training
 
-# Network architecture (Eigen2: 117 columns, 151 context)
+# Network architecture (Eigen2: 117 columns, 151 context).
+# Mono (env=trading_mono): scripts/train.py builds Actor/DoubleCritic from env.num_columns / num_features_obs / investable_*.
 actor_network:
   num_stocks: 108
   stock_start_idx: 9  # Eigen2 INVESTABLE_START_COL
@@ -54,7 +55,7 @@ critic_network:
   use_remat: true
 
 feature_extractor:
-  num_columns: 117  # Eigen2 TOTAL_COLUMNS (skinny)
+  num_columns: 117  # Eigen2 TOTAL_COLUMNS (skinny); override via env for mono
   cnn_filters: 32
   lstm_hidden_size: 128
   num_lstm_layers: 2

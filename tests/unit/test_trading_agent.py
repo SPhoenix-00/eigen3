@@ -11,6 +11,9 @@ from eigen3.agents.trading_agent import TradingAgent, TradingNetworkParams, soft
 from eigen3.models.actor import Actor
 from eigen3.models.critic import Critic, DoubleCritic
 
+# Match default Actor / FeatureExtractor (Eigen2 skinny)
+CTX, NCOL, NF = 151, 117, 5
+
 
 def create_test_agent():
     """Create a test agent"""
@@ -30,8 +33,13 @@ def create_test_agent():
 
 def create_test_spaces():
     """Create test observation and action spaces"""
-    obs_space = Box(low=-jnp.inf, high=jnp.inf, shape=(504, 669, 5))
-    action_space = Box(low=0.0, high=jnp.inf, shape=(108, 2))
+    oshp = (CTX, NCOL, NF)
+    obs_space = Box(low=jnp.full(oshp, -jnp.inf), high=jnp.full(oshp, jnp.inf))
+    ash = (108, 2)
+    action_space = Box(
+        low=jnp.broadcast_to(jnp.array([0.0, 10.0], dtype=jnp.float32), ash),
+        high=jnp.broadcast_to(jnp.array([jnp.inf, 50.0], dtype=jnp.float32), ash),
+    )
     return obs_space, action_space
 
 
@@ -62,7 +70,7 @@ class TestTradingAgent:
 
         # Create batch
         batch_size = 4
-        obs = random.normal(key, (batch_size, 504, 669, 5))
+        obs = random.normal(key, (batch_size, CTX, NCOL, NF))
         sample_batch = SampleBatch(obs=obs)
 
         # Get actions
@@ -89,7 +97,7 @@ class TestTradingAgent:
         agent_state = agent.init(obs_space, action_space, key)
 
         # Create batch
-        obs = random.normal(key, (2, 504, 669, 5))
+        obs = random.normal(key, (2, CTX, NCOL, NF))
         sample_batch = SampleBatch(obs=obs)
 
         # Get actions twice
@@ -107,7 +115,7 @@ class TestTradingAgent:
         key = random.PRNGKey(0)
         agent_state = agent.init(obs_space, action_space, key)
 
-        obs = random.normal(key, (2, 504, 669, 5))
+        obs = random.normal(key, (2, CTX, NCOL, NF))
         sample_batch = SampleBatch(obs=obs)
 
         # Get deterministic actions
@@ -134,10 +142,10 @@ class TestTradingAgent:
 
         # Create batch
         batch_size = 8
-        obs = random.normal(key, (batch_size, 504, 669, 5))
+        obs = random.normal(key, (batch_size, CTX, NCOL, NF))
         actions = random.normal(key, (batch_size, 108, 2))
         rewards = random.normal(key, (batch_size,))
-        next_obs = random.normal(key, (batch_size, 504, 669, 5))
+        next_obs = random.normal(key, (batch_size, CTX, NCOL, NF))
         dones = jnp.zeros((batch_size,))
 
         sample_batch = SampleBatch(
@@ -169,10 +177,10 @@ class TestTradingAgent:
         agent_state = agent.init(obs_space, action_space, key)
 
         # Create batch
-        obs = random.normal(key, (4, 504, 669, 5))
+        obs = random.normal(key, (4, CTX, NCOL, NF))
         actions = random.normal(key, (4, 108, 2))
         rewards = random.normal(key, (4,))
-        next_obs = random.normal(key, (4, 504, 669, 5))
+        next_obs = random.normal(key, (4, CTX, NCOL, NF))
         dones = jnp.zeros((4,))
 
         sample_batch = SampleBatch(
@@ -315,10 +323,10 @@ class TestDifferentCriticTypes:
         agent_state = agent.init(obs_space, action_space, key)
 
         # Create batch
-        obs = random.normal(key, (4, 504, 669, 5))
+        obs = random.normal(key, (4, CTX, NCOL, NF))
         actions = random.normal(key, (4, 108, 2))
         rewards = random.normal(key, (4,))
-        next_obs = random.normal(key, (4, 504, 669, 5))
+        next_obs = random.normal(key, (4, CTX, NCOL, NF))
         dones = jnp.zeros((4,))
 
         sample_batch = SampleBatch(
@@ -350,10 +358,10 @@ class TestDifferentCriticTypes:
         agent_state = agent.init(obs_space, action_space, key)
 
         # Create batch
-        obs = random.normal(key, (4, 504, 669, 5))
+        obs = random.normal(key, (4, CTX, NCOL, NF))
         actions = random.normal(key, (4, 108, 2))
         rewards = random.normal(key, (4,))
-        next_obs = random.normal(key, (4, 504, 669, 5))
+        next_obs = random.normal(key, (4, CTX, NCOL, NF))
         dones = jnp.zeros((4,))
 
         sample_batch = SampleBatch(
@@ -381,7 +389,7 @@ class TestJAXFeatures:
         key = random.PRNGKey(0)
         agent_state = agent.init(obs_space, action_space, key)
 
-        obs = random.normal(key, (2, 504, 669, 5))
+        obs = random.normal(key, (2, CTX, NCOL, NF))
         sample_batch = SampleBatch(obs=obs)
 
         @jax.jit
@@ -399,10 +407,10 @@ class TestJAXFeatures:
         key = random.PRNGKey(0)
         agent_state = agent.init(obs_space, action_space, key)
 
-        obs = random.normal(key, (4, 504, 669, 5))
+        obs = random.normal(key, (4, CTX, NCOL, NF))
         actions = random.normal(key, (4, 108, 2))
         rewards = random.normal(key, (4,))
-        next_obs = random.normal(key, (4, 504, 669, 5))
+        next_obs = random.normal(key, (4, CTX, NCOL, NF))
         dones = jnp.zeros((4,))
 
         sample_batch = SampleBatch(
@@ -436,7 +444,7 @@ class TestJAXFeatures:
         agent_state = agent.init(obs_space, action_space, key)
 
         # Create batch of observations
-        obs = random.normal(key, (batch_size, 504, 669, 5))
+        obs = random.normal(key, (batch_size, CTX, NCOL, NF))
 
         # Create sample batches for each
         def get_actions_single(obs_single, key_single):
@@ -470,10 +478,10 @@ class TestFullScale:
 
         # Full batch
         batch_size = 64
-        obs = random.normal(key, (batch_size, 504, 669, 5))
+        obs = random.normal(key, (batch_size, CTX, NCOL, NF))
         actions = random.normal(key, (batch_size, 108, 2))
         rewards = random.normal(key, (batch_size,))
-        next_obs = random.normal(key, (batch_size, 504, 669, 5))
+        next_obs = random.normal(key, (batch_size, CTX, NCOL, NF))
         dones = jnp.zeros((batch_size,))
 
         sample_batch = SampleBatch(
