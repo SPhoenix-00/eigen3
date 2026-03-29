@@ -9,10 +9,10 @@ investable_start_col: 9
 num_features_obs: 5
 num_features_full: 9
 
-# Episode structure
-trading_period_days: 125
-settlement_period_days: 30
-min_holding_period: 20
+# Episode structure (364-day fiscal-year window; adjust if needed)
+trading_period_days: 364
+settlement_period_days: 0
+min_holding_period: 30
 liquidation_window_days: 10
 max_holding_period: 30
 

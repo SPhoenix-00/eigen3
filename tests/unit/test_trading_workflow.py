@@ -4,11 +4,13 @@ import pytest
 import jax
 import jax.numpy as jnp
 import jax.random as random
+from unittest.mock import MagicMock
 from eigen3.workflows import TradingERLWorkflow, TradingWorkflowConfig, create_trading_workflow
 from eigen3.environment import TradingEnv
 from eigen3.agents import TradingAgent
 from eigen3.models import Actor, DoubleCritic
-from evorl.evaluators import Evaluator
+from evorl.agent import AgentState
+from evorl.sample_batch import SampleBatch
 
 
 def create_test_data(num_days=1000, num_columns=669):
@@ -42,12 +44,13 @@ def create_test_workflow(pop_size=4):
     data_array, data_array_full, norm_stats = create_test_data()
 
     env = TradingEnv(data_array, data_array_full, norm_stats)
+    nc = int(data_array.shape[1])
     agent = TradingAgent(
-        actor_network=Actor(),
-        critic_network=DoubleCritic(),
+        actor_network=Actor(num_columns=nc),
+        critic_network=DoubleCritic(num_columns=nc),
         exploration_noise=0.1,
     )
-    evaluator = Evaluator()  # Simple evaluator
+    evaluator = MagicMock()  # TradingERLWorkflow does not call the EvoRL Evaluator API yet
 
     config = TradingWorkflowConfig(
         population_size=pop_size,
@@ -90,11 +93,12 @@ class TestWorkflowInitialization:
         data_array, data_array_full, norm_stats = create_test_data()
 
         env = TradingEnv(data_array, data_array_full, norm_stats)
+        nc = int(data_array.shape[1])
         agent = TradingAgent(
-            actor_network=Actor(),
-            critic_network=DoubleCritic(),
+            actor_network=Actor(num_columns=nc),
+            critic_network=DoubleCritic(num_columns=nc),
         )
-        evaluator = Evaluator()
+        evaluator = MagicMock()
 
         workflow = create_trading_workflow(env, agent, evaluator, seed=42)
 
@@ -119,8 +123,8 @@ class TestPopulationManagement:
         for agent_params in population:
             assert hasattr(agent_params, 'actor_params')
             assert hasattr(agent_params, 'critic_params')
-            assert hasattr(agent_params, 'actor_target_params')
-            assert hasattr(agent_params, 'critic_target_params')
+            assert hasattr(agent_params, 'target_actor_params')
+            assert hasattr(agent_params, 'target_critic_params')
 
     def test_population_initialized_on_first_generation(self):
         """Test that population is initialized on first generation"""
@@ -166,11 +170,12 @@ class TestGeneticOperators:
         key = random.PRNGKey(0)
         key1, key2, cross_key = random.split(key, 3)
 
-        dummy_obs = jnp.zeros((1, 504, 669, 5))
-        dummy_action = jnp.zeros((1, 108, 2))
-
-        parent1 = workflow.agent.init(key1, dummy_obs, dummy_action)
-        parent2 = workflow.agent.init(key2, dummy_obs, dummy_action)
+        parent1 = workflow.agent.init(
+            workflow.env.obs_space, workflow.env.action_space, key1
+        ).params
+        parent2 = workflow.agent.init(
+            workflow.env.obs_space, workflow.env.action_space, key2
+        ).params
 
         # Perform crossover
         child = workflow._crossover(parent1, parent2, cross_key)
@@ -197,9 +202,9 @@ class TestGeneticOperators:
 
         # Initialize agent
         key = random.PRNGKey(0)
-        dummy_obs = jnp.zeros((1, 504, 669, 5))
-        dummy_action = jnp.zeros((1, 108, 2))
-        params = workflow.agent.init(key, dummy_obs, dummy_action)
+        params = workflow.agent.init(
+            workflow.env.obs_space, workflow.env.action_space, key
+        ).params
 
         # Store original param for comparison
         original_actor_params = params.actor_params
@@ -233,9 +238,9 @@ class TestGeneticOperators:
         workflow.config.mutation_rate = 1.0  # Mutate all parameters
 
         key = random.PRNGKey(0)
-        dummy_obs = jnp.zeros((1, 504, 669, 5))
-        dummy_action = jnp.zeros((1, 108, 2))
-        params = workflow.agent.init(key, dummy_obs, dummy_action)
+        params = workflow.agent.init(
+            workflow.env.obs_space, workflow.env.action_space, key
+        ).params
 
         # Mutate
         key = random.PRNGKey(1)
@@ -263,9 +268,9 @@ class TestExperienceCollection:
 
         # Initialize agent
         key = random.PRNGKey(0)
-        dummy_obs = jnp.zeros((1, 504, 669, 5))
-        dummy_action = jnp.zeros((1, 108, 2))
-        agent_params = workflow.agent.init(key, dummy_obs, dummy_action)
+        agent_params = workflow.agent.init(
+            workflow.env.obs_space, workflow.env.action_space, key
+        ).params
 
         # Collect experience
         key = random.PRNGKey(1)
@@ -286,8 +291,8 @@ class TestExperienceCollection:
             assert 'next_obs' in trans
             assert 'done' in trans
 
-            assert trans['obs'].shape == (504, 669, 5)
-            assert trans['action'].shape == (108, 2)
+            assert trans['obs'].shape == workflow.env.obs_space.shape
+            assert trans['action'].shape == (108, 3)
 
         # Cumulative reward should be a number
         assert isinstance(cumulative_reward, float)
@@ -302,9 +307,9 @@ class TestAgentEvaluation:
 
         # Initialize agent
         key = random.PRNGKey(0)
-        dummy_obs = jnp.zeros((1, 504, 669, 5))
-        dummy_action = jnp.zeros((1, 108, 2))
-        agent_params = workflow.agent.init(key, dummy_obs, dummy_action)
+        agent_params = workflow.agent.init(
+            workflow.env.obs_space, workflow.env.action_space, key
+        ).params
 
         # Evaluate
         key = random.PRNGKey(1)
@@ -425,11 +430,12 @@ class TestWorkflowDeterminism:
         """Test that different seeds produce different results"""
         data_array, data_array_full, norm_stats = create_test_data()
         env = TradingEnv(data_array, data_array_full, norm_stats)
+        nc = int(data_array.shape[1])
         agent = TradingAgent(
-            actor_network=Actor(),
-            critic_network=DoubleCritic(),
+            actor_network=Actor(num_columns=nc),
+            critic_network=DoubleCritic(num_columns=nc),
         )
-        evaluator = Evaluator()
+        evaluator = MagicMock()
         config = TradingWorkflowConfig(population_size=2)
 
         workflow1 = TradingERLWorkflow(env, agent, evaluator, config, seed=0)
@@ -464,13 +470,13 @@ class TestFullWorkflow:
 
         # Verify best agent can be used
         key = random.PRNGKey(0)
-        dummy_obs = jnp.zeros((1, 504, 669, 5))
+        dummy_obs = jnp.zeros((1, *workflow.env.obs_space.shape))
         actions, _ = workflow.agent.evaluate_actions(
-            agent_state=best_agent,
-            sample_batch={'obs': dummy_obs},
+            agent_state=AgentState(params=best_agent),
+            sample_batch=SampleBatch(obs=dummy_obs),
             key=key,
         )
-        assert actions.shape == (1, 108, 2)
+        assert actions.shape == (1, 108, 3)
 
 
 if __name__ == "__main__":

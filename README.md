@@ -16,13 +16,16 @@ Eigen3 combines Deep Reinforcement Learning (DDPG) with Evolutionary Algorithms 
 ### Neural Networks
 - **FeatureExtractor**: CNN-LSTM architecture for temporal feature extraction
 - **AttentionModule**: Multi-head attention for global context
-- **Actor**: Policy network outputting [coefficient, sale_target] per stock
+- **Actor**: Policy network outputting **[coefficient, sale_target, close_fraction]** per stock (`close_fraction` ∈ [0, 1] for discretionary market sells)
 - **Critic**: Value network (twin Q-functions for TD3-style training)
 
 ### Environment
 - **TradingEnv**: JAX-native stock trading simulator (multi-stock default; mono via `configs/env/trading_mono.yaml`)
-- Default data layout: 117 columns, 108 investable from column 9; 151 **trading-day** context windows
-- **Exits**: No forced max-holding exit. Target-based sells trigger when the price reaches the lot’s target, only after `min_holding_period` **trading days** since the **last buy** for that stock. Additional buys on the same stock are allowed (up to `max_positions` lots). Any open lots are **liquidated at the episode’s last step** at the current price.
+- Default data layout: 117 columns, 108 investable from column 9; **151-row** observation context window along the time axis
+- **Episode length (defaults)**: `trading_period_days` + `settlement_period_days` env steps (one step = one row in `data_array`). Config defaults target a **364-step** fiscal-year-style horizon with **no separate settlement window** (`settlement_period_days: 0`); adjust in YAML if your data cadence differs.
+- **Actions** (per investable stock): **coefficient**, **sale_target** (% gain target for new lots), **close_fraction** — after automatic position updates, up to that fraction of open lots on a stock may be closed **at market** (FIFO by entry step), only when the min-hold rule allows.
+- **Min hold (`min_holding_period`)**: Counts **env steps** = **differences in row indices** in your series (`current_step - last_buy_step`). The env does **not** parse wall-clock dates. If each row is a **trading session only**, then e.g. `30` means **30 trading days** (typically **fewer than 30 calendar days**). For calendar-day semantics you need one row per calendar day in the data (or extend the env).
+- **Exits**: Target-based sells when price reaches the lot target and min-hold is satisfied (using **last buy** on that stock across lots). Discretionary sells use the same gate. New lots allowed until `trading_end_step` (subject to `max_positions`). All open lots are **liquidated at the episode’s last step** at the current price (or entry if invalid).
 - Hurdle rate, conviction scaling, optional observation noise; fixed-size position table
 
 ### Training

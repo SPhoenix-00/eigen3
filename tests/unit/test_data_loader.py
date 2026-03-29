@@ -465,7 +465,7 @@ class TestIntegrationWithEnvironment:
         assert state.obs.shape == (504, 669, 5)
 
         # Step environment
-        action = jnp.ones((108, 2))
+        action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         new_state = env.step(state, action)
 
         # Should work without errors

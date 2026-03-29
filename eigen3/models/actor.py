@@ -4,7 +4,7 @@ Converts PyTorch Actor to JAX/Flax with:
 - FeatureExtractor for temporal features
 - Cross-attention for global context
 - Dual processing paths (investable stocks + global context)
-- Two output heads (coefficient and sale_target)
+- Three output heads (coefficient, sale_target, close_fraction)
 - Gradient checkpointing support
 """
 
@@ -20,10 +20,11 @@ from eigen3.models.attention import CrossAttentionModule
 
 
 class Actor(nn.Module):
-    """Actor network: outputs actions [coefficient, sale_target] for each stock (Eigen2-aligned).
+    """Actor network: outputs [coefficient, sale_target, close_fraction] per stock.
 
     Uses cross-attention (or self-attention) for feature importance. Eigen2: self-attention,
-    investable slice 9:117, coefficient ReLU then clamp [0, 100], sale target clip [10, 50].
+    investable slice 9:117, coefficient ReLU then clamp [0, 100], sale target clip [10, 50],
+    close_fraction sigmoid in [0, 1].
     """
     # Architecture parameters (Eigen2: INVESTABLE_START_COL=9, 108 stocks)
     num_investable_stocks: int = 108
@@ -99,6 +100,14 @@ class Actor(nn.Module):
             bias_init=nn.initializers.constant(center_sale),
         )
 
+        self.close_fc1 = nn.Dense(self.actor_hidden_dims[2], name='close_fc1')
+        self.close_fc2 = nn.Dense(
+            1,
+            name='close_fc2',
+            kernel_init=nn.initializers.lecun_normal(),
+            bias_init=nn.initializers.constant(-2.0),
+        )
+
     def _process_investable(self, investable_features: chex.Array, train: bool) -> chex.Array:
         """Process investable stocks (for gradient checkpointing)
 
@@ -164,6 +173,15 @@ class Actor(nn.Module):
         x = jnp.squeeze(x, axis=-1)  # [batch, 108]
         return x
 
+    def _process_close_head(self, combined: chex.Array, train: bool) -> chex.Array:
+        """Raw logits for discretionary close fraction (sigmoid applied in __call__)."""
+        x = self.close_fc1(combined)
+        x = nn.relu(x)
+        x = nn.Dropout(self.dropout_rate, deterministic=not train)(x)
+        x = self.close_fc2(x)
+        x = jnp.squeeze(x, axis=-1)
+        return x
+
     def _apply_coefficient_activation(self, raw: chex.Array) -> chex.Array:
         """Apply activation: ReLU then clamp [0, 100] (Eigen2: align training with inference)."""
         coefficients = nn.relu(raw)
@@ -185,7 +203,7 @@ class Actor(nn.Module):
             return_attention_weights: Whether to return attention weights for logging
 
         Returns:
-            actions: [batch, 108, 2] with [coefficient, sale_target] per stock
+            actions: [batch, num_investable_stocks, 3] with [coefficient, sale_target, close_fraction]
             attention_weights: [batch, num_columns] or None
         """
         batch_size = state.shape[0]
@@ -259,17 +277,19 @@ class Actor(nn.Module):
         if train and self.use_remat:
             raw_coefficients = remat(lambda x: self._process_coefficient_head(x, train))(combined)
             raw_sale_targets = remat(lambda x: self._process_sale_target_head(x, train))(combined)
+            raw_close = remat(lambda x: self._process_close_head(x, train))(combined)
         else:
             raw_coefficients = self._process_coefficient_head(combined, train)
             raw_sale_targets = self._process_sale_target_head(combined, train)
+            raw_close = self._process_close_head(combined, train)
 
         # Apply activations (Eigen2: coefficient ReLU+clamp [0,100]; sale target clip [10,50])
         coefficients = self._apply_coefficient_activation(raw_coefficients)
         sale_targets = jnp.clip(raw_sale_targets, self.min_sale_target, self.max_sale_target)
+        close_fractions = jax.nn.sigmoid(raw_close)
 
         # Stack into action tensor
-        actions = jnp.stack([coefficients, sale_targets], axis=-1)
-        # [batch, 108, 2]
+        actions = jnp.stack([coefficients, sale_targets, close_fractions], axis=-1)
 
         if return_attention_weights:
             return actions, attention_weights
@@ -301,8 +321,8 @@ def test_actor():
 
     print(f"Input shape: {state.shape}")
     print(f"Actions shape: {actions.shape}")
-    print(f"Expected shape: ({batch_size}, 108, 2)")
-    assert actions.shape == (batch_size, 108, 2)
+    print(f"Expected shape: ({batch_size}, 108, 3)")
+    assert actions.shape == (batch_size, 108, 3)
     assert attn_weights is None
 
     # Check coefficient range (should be >= 0)
@@ -315,6 +335,10 @@ def test_actor():
     assert jnp.all(sale_targets >= 10.0) and jnp.all(sale_targets <= 50.0), \
         f"Sale targets out of range: [{jnp.min(sale_targets)}, {jnp.max(sale_targets)}]"
     print(f"✓ Sale target range: [{jnp.min(sale_targets):.4f}, {jnp.max(sale_targets):.4f}]")
+
+    close_fr = actions[:, :, 2]
+    assert jnp.all(close_fr >= 0.0) and jnp.all(close_fr <= 1.0)
+    print(f"✓ Close fraction range: [{jnp.min(close_fr):.4f}, {jnp.max(close_fr):.4f}]")
 
     # Forward pass with attention weights
     actions, attn_weights = actor.apply(

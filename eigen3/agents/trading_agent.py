@@ -11,6 +11,7 @@ from typing import Tuple, Optional
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 import chex
 from evorl.agent import Agent, AgentState
 from evorl.types import PyTreeData
@@ -89,12 +90,12 @@ class TradingAgent(Agent):
             train=False
         )
 
-        # Create network params with targets (initialized as copies)
+        # Targets must be separate array buffers or soft updates are no-ops (τs+(1-τ)t=t when s is t).
         params = TradingNetworkParams(
             actor_params=actor_params,
             critic_params=critic_params,
-            target_actor_params=actor_params,
-            target_critic_params=critic_params,
+            target_actor_params=jtu.tree_map(jnp.copy, actor_params),
+            target_critic_params=jtu.tree_map(jnp.copy, critic_params),
         )
 
         return AgentState(params=params)
@@ -136,6 +137,9 @@ class TradingAgent(Agent):
         )
         noisy_actions = noisy_actions.at[:, :, 1].set(
             jnp.clip(noisy_actions[:, :, 1], self.min_sale_target, self.max_sale_target)
+        )
+        noisy_actions = noisy_actions.at[:, :, 2].set(
+            jnp.clip(noisy_actions[:, :, 2], 0.0, 1.0)
         )
 
         policy_info = {}
@@ -193,7 +197,7 @@ class TradingAgent(Agent):
 
         # Extract batch data
         obs = sample_batch.obs  # [batch, context_days, num_columns, 5]
-        actions = sample_batch.actions  # [batch, 108, 2]
+        actions = sample_batch.actions  # [batch, num_stocks, 3]
         rewards = sample_batch.rewards  # [batch]
         next_obs = sample_batch.next_obs  # [batch, context_days, num_columns, 5]
         dones = sample_batch.dones  # [batch]
@@ -227,11 +231,12 @@ class TradingAgent(Agent):
         )
 
         # Compute current Q-values
+        # train=False: avoid updating BatchNorm batch_stats inside a frozen param pytree.
         current_q = self.critic_network.apply(
             params.critic_params,
             obs,
             actions,
-            train=True
+            train=False
         )
 
         # Critic loss (MSE for each critic if using twin critics)
@@ -249,7 +254,7 @@ class TradingAgent(Agent):
         actor_actions, _ = self.actor_network.apply(
             params.actor_params,
             obs,
-            train=True,
+            train=False,
             return_attention_weights=False
         )
 
@@ -258,7 +263,7 @@ class TradingAgent(Agent):
             params.critic_params,
             obs,
             actor_actions,
-            train=True
+            train=False
         )
 
         # For twin critics, use mean or first critic
@@ -294,10 +299,10 @@ def soft_target_update(
 
     def update_tree(target, source):
         """Update target tree with soft update from source"""
-        return jax.tree_map(
+        return jtu.tree_map(
             lambda t, s: tau * s + (1 - tau) * t,
             target,
-            source
+            source,
         )
 
     return params.replace(
@@ -335,10 +340,10 @@ def test_trading_agent():
 
     oshp = (151, 117, 5)
     obs_space = Box(low=jnp.full(oshp, -jnp.inf), high=jnp.full(oshp, jnp.inf))
-    ash = (108, 2)
+    ash = (108, 3)
     action_space = Box(
-        low=jnp.broadcast_to(jnp.array([0.0, 10.0], dtype=jnp.float32), ash),
-        high=jnp.broadcast_to(jnp.array([jnp.inf, 50.0], dtype=jnp.float32), ash),
+        low=jnp.broadcast_to(jnp.array([0.0, 10.0, 0.0], dtype=jnp.float32), ash),
+        high=jnp.broadcast_to(jnp.array([jnp.inf, 50.0, 1.0], dtype=jnp.float32), ash),
     )
 
     # Initialize agent
@@ -356,12 +361,12 @@ def test_trading_agent():
     actions, policy_info = agent.compute_actions(agent_state, sample_batch, action_key)
 
     print(f"✓ compute_actions: actions shape = {actions.shape}")
-    assert actions.shape == (batch_size, 108, 2)
+    assert actions.shape == (batch_size, 108, 3)
 
     # Test evaluate_actions (no noise)
     eval_actions, _ = agent.evaluate_actions(agent_state, sample_batch, key)
     print(f"✓ evaluate_actions: actions shape = {eval_actions.shape}")
-    assert eval_actions.shape == (batch_size, 108, 2)
+    assert eval_actions.shape == (batch_size, 108, 3)
 
     # Test loss computation
     next_obs = random.normal(key, (batch_size, 151, 117, 5))

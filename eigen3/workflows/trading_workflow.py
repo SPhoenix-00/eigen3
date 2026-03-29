@@ -14,8 +14,6 @@ import jax
 import jax.numpy as jnp
 import jax.random as random
 from flax.core.frozen_dict import FrozenDict
-
-from evorl.workflows import Workflow
 from evorl.types import PyTreeData
 from evorl.sample_batch import SampleBatch
 from evorl.envs import Env
@@ -56,7 +54,7 @@ class TradingWorkflowConfig:
     target_update_period: int = 10
 
 
-class TradingERLWorkflow(Workflow):
+class TradingERLWorkflow:
     """Custom ERL workflow for stock trading
 
     This workflow implements a hybrid evolutionary-gradient approach:
@@ -86,8 +84,9 @@ class TradingERLWorkflow(Workflow):
             config: Workflow configuration
             seed: Random seed for reproducibility
         """
-        super().__init__(env=env, agent=agent, evaluator=evaluator)
-
+        self.env = env
+        self.agent = agent
+        self.evaluator = evaluator
         self.config = config
         self.seed = seed
         self.key = random.PRNGKey(seed)
@@ -181,13 +180,13 @@ class TradingERLWorkflow(Workflow):
         keys = random.split(key, 4)
 
         # Perform crossover on actor and critic parameters
-        child_actor = jax.tree_map(
+        child_actor = jax.tree.map(
             lambda p1, p2: crossover_pytree(p1, p2, keys[0]),
             parent1.actor_params,
             parent2.actor_params,
         )
 
-        child_critic = jax.tree_map(
+        child_critic = jax.tree.map(
             lambda p1, p2: crossover_pytree(p1, p2, keys[1]),
             parent1.critic_params,
             parent2.critic_params,
@@ -231,12 +230,12 @@ class TradingERLWorkflow(Workflow):
         keys = random.split(key, 2)
 
         # Mutate actor and critic parameters
-        mutated_actor = jax.tree_map(
+        mutated_actor = jax.tree.map(
             lambda p: mutate_pytree(p, keys[0]),
             params.actor_params,
         )
 
-        mutated_critic = jax.tree_map(
+        mutated_critic = jax.tree.map(
             lambda p: mutate_pytree(p, keys[1]),
             params.critic_params,
         )

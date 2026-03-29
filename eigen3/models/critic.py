@@ -26,7 +26,7 @@ class Critic(nn.Module):
     """
     # Architecture parameters
     num_investable_stocks: int = 108
-    action_dim: int = 2
+    action_dim: int = 3
     critic_hidden_dims: Tuple[int, int] = (256, 128)
 
     # Feature extraction parameters (Eigen2: 117 columns)
@@ -65,10 +65,10 @@ class Critic(nn.Module):
             self.attention = None
 
         # Action dimension (flattened)
-        self.action_flat_dim = self.num_investable_stocks * self.action_dim  # 108 * 2 = 216
+        self.action_flat_dim = self.num_investable_stocks * self.action_dim
 
         # Critic FC layers
-        # Input: state_features (256) + action_flat (216) = 472
+        # Input: state_features (256) + action_flat (num_stocks * action_dim)
         self.fc1 = nn.Dense(self.critic_hidden_dims[0], name='critic_fc1')
         self.fc2 = nn.Dense(self.critic_hidden_dims[1], name='critic_fc2')
         self.fc3 = nn.Dense(1, name='critic_fc3')
@@ -105,7 +105,7 @@ class Critic(nn.Module):
 
         Args:
             state: Input tensor [batch, context_days, num_columns, num_features]
-            action: Action tensor [batch, 108, 2]
+            action: Action tensor [batch, num_investable_stocks, action_dim]
             train: Whether in training mode (for dropout and BatchNorm)
 
         Returns:
@@ -124,11 +124,10 @@ class Critic(nn.Module):
         state_features = jnp.mean(features, axis=1)  # [batch, lstm_output_size]
 
         # Flatten action
-        action_flat = action.reshape(action.shape[0], -1)  # [batch, 216]
+        action_flat = action.reshape(action.shape[0], -1)
 
         # Concatenate state and action
         x = jnp.concatenate([state_features, action_flat], axis=-1)
-        # [batch, lstm_output_size + 216]
 
         # Critic network (with checkpointing)
         if train and self.use_remat:
@@ -143,7 +142,7 @@ class DoubleCritic(nn.Module):
     """Twin Q-networks for TD3-style training (Eigen2-aligned)."""
     # Architecture parameters
     num_investable_stocks: int = 108
-    action_dim: int = 2
+    action_dim: int = 3
     critic_hidden_dims: Tuple[int, int] = (256, 128)
 
     # Feature extraction parameters (Eigen2: 117 columns)
@@ -170,7 +169,7 @@ class DoubleCritic(nn.Module):
 
         Args:
             state: Input tensor [batch, context_days, num_columns, num_features]
-            action: Action tensor [batch, 108, 2]
+            action: Action tensor [batch, num_investable_stocks, action_dim]
             train: Whether in training mode
 
         Returns:
@@ -222,7 +221,7 @@ def test_critic():
 
     # Create inputs (Eigen2: 117 columns, 151 context days)
     state = random.normal(key, (batch_size, context_days, 117, 5))
-    action = random.normal(key, (batch_size, 108, 2))
+    action = random.normal(key, (batch_size, 108, 3))
 
     # Test single Critic
     print("Testing Critic...")

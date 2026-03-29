@@ -41,9 +41,9 @@ class TestTradingEnv:
         env = TradingEnv(data_array, data_array_full, norm_stats)
 
         assert env.context_window_days == 151
-        assert env.trading_period_days == 125
-        assert env.settlement_period_days == 30
-        assert env.min_holding_period == 20
+        assert env.trading_period_days == 364
+        assert env.settlement_period_days == 0
+        assert env.min_holding_period == 30
         assert env.max_positions == 10
 
     def test_env_reset(self):
@@ -76,7 +76,7 @@ class TestTradingEnv:
         state = env.reset(key)
 
         # Create action
-        action = jnp.ones((108, 2))
+        action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         action = action.at[:, 0].set(2.0)  # Coefficients
         action = action.at[:, 1].set(20.0)  # Sale targets
 
@@ -98,7 +98,7 @@ class TestTradingEnv:
         # Run episode
         steps = 0
         while not state.done and steps < 200:
-            action = jnp.ones((108, 2))
+            action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
             action = action.at[:, 0].set(2.0)
             action = action.at[:, 1].set(20.0)
 
@@ -117,7 +117,7 @@ class TestTradingEnv:
         state = env.reset(key)
 
         # Create strong action
-        action = jnp.ones((108, 2))
+        action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         action = action.at[:, 0].set(5.0)  # High coefficients
         action = action.at[:, 1].set(20.0)
 
@@ -139,7 +139,7 @@ class TestTradingEnv:
         state = env.reset(key)
 
         # Take action with very low coefficient (no position opens)
-        action = jnp.ones((108, 2))
+        action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         action = action.at[:, 0].set(0.01)  # Very low coefficients
         action = action.at[:, 1].set(20.0)
 
@@ -174,7 +174,7 @@ class TestPositionManagement:
         state = env.reset(key)
 
         # Try to open many positions
-        action = jnp.ones((108, 2))
+        action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         action = action.at[:, 0].set(10.0)  # Very high coefficients
         action = action.at[:, 1].set(20.0)
 
@@ -199,19 +199,28 @@ class TestPositionManagement:
 
         norm_stats = {'mean': jnp.zeros(5), 'std': jnp.ones(5)}
 
-        env = TradingEnv(data_array, data_array_full, norm_stats)
+        # Single lot + short min-hold; allow a low % target (default env min sale target is 10%).
+        env = TradingEnv(
+            data_array,
+            data_array_full,
+            norm_stats,
+            max_positions=1,
+            min_holding_period=1,
+            min_sale_target=3.0,
+            max_sale_target=50.0,
+        )
 
         key = random.PRNGKey(0)
         state = env.reset(key)
 
         # Open position with low sale target
-        action = jnp.ones((108, 2))
+        action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         action = action.at[:, 0].set(5.0)
-        action = action.at[:, 1].set(5.0)  # Low target (5% gain)
+        action = action.at[:, 1].set(3.0)  # Low target (3% gain)
 
         # Run until position opens and closes
         initial_trades = 0
-        for _ in range(50):
+        for _ in range(120):
             state = env.step(state, action)
             if state.env_state.num_trades > initial_trades:
                 break
@@ -235,7 +244,7 @@ class TestPositionManagement:
         key = random.PRNGKey(0)
         state = env.reset(key)
 
-        action = jnp.ones((108, 2))
+        action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         action = action.at[:, 0].set(5.0)
         action = action.at[:, 1].set(50.0)  # High target, never hit on flat prices
 
@@ -260,7 +269,7 @@ class TestJAXFeatures:
 
         key = random.PRNGKey(0)
         state = env.reset(key)
-        action = jnp.ones((108, 2))
+        action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
 
         @jax.jit
         def jitted_step(state, action):
@@ -323,7 +332,7 @@ class TestJAXFeatures:
             new_state = env.step(state, action)
             return new_state.reward
 
-        action = jnp.ones((108, 2))
+        action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         grad_fn = jax.grad(lambda a: reward_fn(a).sum())
 
         # Should not raise error
@@ -355,7 +364,7 @@ class TestObservationSpace:
         state = env.reset(key)
 
         # Run several steps
-        action = jnp.ones((108, 2))
+        action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         for _ in range(10):
             state = env.step(state, action)
             assert state.obs.shape == (151, 669, 5)
@@ -384,7 +393,7 @@ class TestRewardSystem:
         key = random.PRNGKey(0)
         state = env.reset(key)
 
-        action = jnp.ones((108, 2))
+        action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         action = action.at[:, 0].set(2.0)
         action = action.at[:, 1].set(5.0)
 
@@ -405,7 +414,7 @@ class TestRewardSystem:
         key = random.PRNGKey(0)
         state = env.reset(key)
 
-        action = jnp.ones((108, 2))
+        action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         cumulative = 0.0
 
         for _ in range(10):
@@ -421,7 +430,7 @@ class TestMonoRules:
     restriction, end-of-episode liquidation."""
 
     @staticmethod
-    def _create_mono_env(num_days=500, **env_kwargs):
+    def _create_mono_env(num_days=700, **env_kwargs):
         """Create a single-stock env with rising prices."""
         prices = jnp.linspace(100, 200, num_days).reshape(-1, 1)
         data_array = jnp.ones((num_days, 1, 5))
@@ -434,6 +443,8 @@ class TestMonoRules:
             investable_start_col=0,
             max_positions=5,
             min_holding_period=20,
+            min_sale_target=1.0,
+            max_sale_target=50.0,
         )
         defaults.update(env_kwargs)
         env = TradingEnv(data_array, data_array_full, norm_stats, **defaults)
@@ -445,7 +456,7 @@ class TestMonoRules:
         key = random.PRNGKey(0)
         state = env.reset(key)
 
-        buy_action = jnp.array([[5.0, 20.0]])
+        buy_action = jnp.array([[5.0, 20.0, 0.0]])
 
         for _ in range(5):
             state = env.step(state, buy_action)
@@ -466,8 +477,8 @@ class TestMonoRules:
         key = random.PRNGKey(0)
         state = env.reset(key)
 
-        buy_action = jnp.array([[5.0, 1.0]])   # 1% target -- easily hit
-        hold_action = jnp.array([[0.0, 1.0]])   # coeff below threshold, no buy
+        buy_action = jnp.array([[5.0, 1.0, 0.0]])   # 1% target -- easily hit
+        hold_action = jnp.array([[0.0, 1.0, 0.0]])   # coeff below threshold, no buy
 
         # Call 0: first buy
         state = env.step(state, buy_action)
@@ -495,8 +506,8 @@ class TestMonoRules:
         key = random.PRNGKey(0)
         state = env.reset(key)
 
-        buy_action = jnp.array([[5.0, 1.0]])
-        hold_action = jnp.array([[0.0, 1.0]])
+        buy_action = jnp.array([[5.0, 1.0, 0.0]])
+        hold_action = jnp.array([[0.0, 1.0, 0.0]])
 
         # Open one position
         state = env.step(state, buy_action)
@@ -513,7 +524,7 @@ class TestMonoRules:
     def test_mono_end_of_episode_liquidation(self):
         """All remaining positions are liquidated at episode end."""
         # Flat prices so target is never hit
-        num_days = 500
+        num_days = 700
         prices = jnp.ones((num_days, 1)) * 100.0
         data_array = jnp.ones((num_days, 1, 5))
         data_array = data_array.at[:, :, 0].set(prices)
@@ -531,8 +542,8 @@ class TestMonoRules:
         key = random.PRNGKey(0)
         state = env.reset(key)
 
-        buy_action = jnp.array([[5.0, 50.0]])   # 50% target, never hit
-        hold_action = jnp.array([[0.0, 50.0]])
+        buy_action = jnp.array([[5.0, 50.0, 0.0]])   # 50% target, never hit
+        hold_action = jnp.array([[0.0, 50.0, 0.0]])
 
         # Open a position then hold until episode ends
         state = env.step(state, buy_action)
@@ -547,6 +558,24 @@ class TestMonoRules:
         assert state.env_state.num_trades > 0, \
             "Liquidation should register as a completed trade"
 
+    def test_mono_discretionary_close_after_min_hold(self):
+        """Agent can close lots at market via close_fraction after min-holding period."""
+        env = self._create_mono_env()
+        key = random.PRNGKey(7)
+        state = env.reset(key)
+
+        buy = jnp.array([[5.0, 50.0, 0.0]])
+        hold = jnp.array([[0.0, 50.0, 0.0]])
+        sell_all = jnp.array([[0.0, 50.0, 1.0]])
+
+        state = env.step(state, buy)
+        assert state.env_state.num_active_positions >= 1
+        for _ in range(30):
+            state = env.step(state, hold)
+        state = env.step(state, sell_all)
+        assert state.env_state.num_active_positions == 0
+        assert state.env_state.num_trades >= 1
+
 
 @pytest.mark.slow
 class TestFullEpisode:
@@ -560,7 +589,7 @@ class TestFullEpisode:
         key = random.PRNGKey(0)
         state = env.reset(key)
 
-        action = jnp.ones((108, 2))
+        action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         action = action.at[:, 0].set(2.0)
         action = action.at[:, 1].set(20.0)
 

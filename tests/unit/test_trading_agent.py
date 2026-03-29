@@ -4,6 +4,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 import jax.random as random
+import jax.tree_util as jtu
 from evorl.envs import Box
 from evorl.sample_batch import SampleBatch
 
@@ -13,6 +14,17 @@ from eigen3.models.critic import Critic, DoubleCritic
 
 # Match default Actor / FeatureExtractor (Eigen2 skinny)
 CTX, NCOL, NF = 151, 117, 5
+
+
+def _bump_float_leaves(tree, eps: float = 0.1):
+    """Nudge float arrays so online and target networks are not identical."""
+
+    def f(x):
+        if isinstance(x, jax.Array) and jnp.issubdtype(x.dtype, jnp.floating):
+            return x + jnp.asarray(eps, dtype=x.dtype)
+        return x
+
+    return jtu.tree_map(f, tree)
 
 
 def create_test_agent():
@@ -35,10 +47,10 @@ def create_test_spaces():
     """Create test observation and action spaces"""
     oshp = (CTX, NCOL, NF)
     obs_space = Box(low=jnp.full(oshp, -jnp.inf), high=jnp.full(oshp, jnp.inf))
-    ash = (108, 2)
+    ash = (108, 3)
     action_space = Box(
-        low=jnp.broadcast_to(jnp.array([0.0, 10.0], dtype=jnp.float32), ash),
-        high=jnp.broadcast_to(jnp.array([jnp.inf, 50.0], dtype=jnp.float32), ash),
+        low=jnp.broadcast_to(jnp.array([0.0, 10.0, 0.0], dtype=jnp.float32), ash),
+        high=jnp.broadcast_to(jnp.array([jnp.inf, 50.0, 1.0], dtype=jnp.float32), ash),
     )
     return obs_space, action_space
 
@@ -78,7 +90,7 @@ class TestTradingAgent:
         actions, policy_info = agent.compute_actions(agent_state, sample_batch, action_key)
 
         # Check shape
-        assert actions.shape == (batch_size, 108, 2)
+        assert actions.shape == (batch_size, 108, 3)
 
         # Check ranges
         coefficients = actions[:, :, 0]
@@ -143,7 +155,7 @@ class TestTradingAgent:
         # Create batch
         batch_size = 8
         obs = random.normal(key, (batch_size, CTX, NCOL, NF))
-        actions = random.normal(key, (batch_size, 108, 2))
+        actions = random.normal(key, (batch_size, 108, 3))
         rewards = random.normal(key, (batch_size,))
         next_obs = random.normal(key, (batch_size, CTX, NCOL, NF))
         dones = jnp.zeros((batch_size,))
@@ -178,7 +190,7 @@ class TestTradingAgent:
 
         # Create batch
         obs = random.normal(key, (4, CTX, NCOL, NF))
-        actions = random.normal(key, (4, 108, 2))
+        actions = random.normal(key, (4, 108, 3))
         rewards = random.normal(key, (4,))
         next_obs = random.normal(key, (4, CTX, NCOL, NF))
         dones = jnp.zeros((4,))
@@ -215,12 +227,17 @@ class TestSoftTargetUpdate:
 
         key = random.PRNGKey(0)
         agent_state = agent.init(obs_space, action_space, key)
+        bumped = agent_state.replace(
+            params=agent_state.params.replace(
+                actor_params=_bump_float_leaves(agent_state.params.actor_params)
+            )
+        )
 
         # Perform soft update
-        new_params = soft_target_update(agent_state.params, tau=0.1)
+        new_params = soft_target_update(bumped.params, tau=0.1)
 
         # Check that targets changed
-        old_target = jax.tree_util.tree_leaves(agent_state.params.target_actor_params)[0]
+        old_target = jax.tree_util.tree_leaves(bumped.params.target_actor_params)[0]
         new_target = jax.tree_util.tree_leaves(new_params.target_actor_params)[0]
 
         assert not jnp.array_equal(old_target, new_target)
@@ -232,17 +249,22 @@ class TestSoftTargetUpdate:
 
         key = random.PRNGKey(0)
         agent_state = agent.init(obs_space, action_space, key)
+        bumped = agent_state.replace(
+            params=agent_state.params.replace(
+                actor_params=_bump_float_leaves(agent_state.params.actor_params)
+            )
+        )
 
         # Get a leaf from source and target
-        source_leaf = jax.tree_util.tree_leaves(agent_state.params.actor_params)[0]
-        target_leaf = jax.tree_util.tree_leaves(agent_state.params.target_actor_params)[0]
+        source_leaf = jax.tree_util.tree_leaves(bumped.params.actor_params)[0]
+        target_leaf = jax.tree_util.tree_leaves(bumped.params.target_actor_params)[0]
 
         # Update with small tau
-        small_tau_params = soft_target_update(agent_state.params, tau=0.001)
+        small_tau_params = soft_target_update(bumped.params, tau=0.001)
         small_tau_leaf = jax.tree_util.tree_leaves(small_tau_params.target_actor_params)[0]
 
         # Update with large tau
-        large_tau_params = soft_target_update(agent_state.params, tau=0.1)
+        large_tau_params = soft_target_update(bumped.params, tau=0.1)
         large_tau_leaf = jax.tree_util.tree_leaves(large_tau_params.target_actor_params)[0]
 
         # Large tau should move target closer to source
@@ -258,12 +280,17 @@ class TestSoftTargetUpdate:
 
         key = random.PRNGKey(0)
         agent_state = agent.init(obs_space, action_space, key)
+        bumped = agent_state.replace(
+            params=agent_state.params.replace(
+                actor_params=_bump_float_leaves(agent_state.params.actor_params)
+            )
+        )
 
         # Update with tau=1.0 (full copy)
-        new_params = soft_target_update(agent_state.params, tau=1.0)
+        new_params = soft_target_update(bumped.params, tau=1.0)
 
         # Target should equal source
-        source_leaf = jax.tree_util.tree_leaves(agent_state.params.actor_params)[0]
+        source_leaf = jax.tree_util.tree_leaves(bumped.params.actor_params)[0]
         target_leaf = jax.tree_util.tree_leaves(new_params.target_actor_params)[0]
 
         assert jnp.allclose(source_leaf, target_leaf)
@@ -298,7 +325,7 @@ class TestNetworkParams:
         agent_state = agent.init(obs_space, action_space, key)
 
         # Should be able to tree_map
-        doubled_params = jax.tree_map(lambda x: x * 2, agent_state.params)
+        doubled_params = jax.tree.map(lambda x: x * 2, agent_state.params)
 
         # Should have same structure
         assert isinstance(doubled_params, TradingNetworkParams)
@@ -324,7 +351,7 @@ class TestDifferentCriticTypes:
 
         # Create batch
         obs = random.normal(key, (4, CTX, NCOL, NF))
-        actions = random.normal(key, (4, 108, 2))
+        actions = random.normal(key, (4, 108, 3))
         rewards = random.normal(key, (4,))
         next_obs = random.normal(key, (4, CTX, NCOL, NF))
         dones = jnp.zeros((4,))
@@ -359,7 +386,7 @@ class TestDifferentCriticTypes:
 
         # Create batch
         obs = random.normal(key, (4, CTX, NCOL, NF))
-        actions = random.normal(key, (4, 108, 2))
+        actions = random.normal(key, (4, 108, 3))
         rewards = random.normal(key, (4,))
         next_obs = random.normal(key, (4, CTX, NCOL, NF))
         dones = jnp.zeros((4,))
@@ -397,7 +424,7 @@ class TestJAXFeatures:
             return agent.compute_actions(state, batch, key)
 
         actions, _ = jitted_compute(agent_state, sample_batch, key)
-        assert actions.shape == (2, 108, 2)
+        assert actions.shape == (2, 108, 3)
 
     def test_loss_is_jittable(self):
         """Test that loss computation can be JIT compiled"""
@@ -408,7 +435,7 @@ class TestJAXFeatures:
         agent_state = agent.init(obs_space, action_space, key)
 
         obs = random.normal(key, (4, CTX, NCOL, NF))
-        actions = random.normal(key, (4, 108, 2))
+        actions = random.normal(key, (4, 108, 3))
         rewards = random.normal(key, (4,))
         next_obs = random.normal(key, (4, CTX, NCOL, NF))
         dones = jnp.zeros((4,))
@@ -454,7 +481,7 @@ class TestJAXFeatures:
 
         # Vectorize
         actions = jax.vmap(get_actions_single)(obs, keys)
-        assert actions.shape == (batch_size, 108, 2)
+        assert actions.shape == (batch_size, 108, 3)
 
 
 @pytest.mark.slow
@@ -479,7 +506,7 @@ class TestFullScale:
         # Full batch
         batch_size = 64
         obs = random.normal(key, (batch_size, CTX, NCOL, NF))
-        actions = random.normal(key, (batch_size, 108, 2))
+        actions = random.normal(key, (batch_size, 108, 3))
         rewards = random.normal(key, (batch_size,))
         next_obs = random.normal(key, (batch_size, CTX, NCOL, NF))
         dones = jnp.zeros((batch_size,))
