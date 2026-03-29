@@ -6,6 +6,7 @@ All notable changes to Eigen3 are documented here.
 
 ### Added
 
+- **process_eigen_data.py**: VOO (S&P 500 ETF) data processing pipeline. Reads a single-instrument CSV (Close price col B, PE NTM col D, VIX col AF; data starting row 4), computes the full Eigen2 VBA indicator stack (RSI, MACD, MACD Signal, TRIX, diff20DMA) for each of the three base series, and outputs a production-ready flat CSV/PKL with 18 columns (6 per series). Uses the exact same EMA initialisation and smoothing constants as Eigen2 for indicator parity.
 - **configs/env/trading_mono.yaml**: Single-stock (mono) Hydra overrides: one column, `investable_start_col: 0`, optional `column_index` for slicing a multi-column dataset, `min_holding_period` as the minimum **trading days** since the last buy before any target-based sell, and episode-end liquidation of all open lots.
 - **Mono trading tests** (`tests/unit/test_trading_env.py`): Coverage for multiple buys on the same symbol, 20-trading-day sell restriction after the last buy, target-based sell after the window opens, and end-of-episode liquidation.
 - **EIGEN2_DELTA.md**: Delta document listing Eigen2 vs Eigen3 sync (constants, behavior, file mapping). Use it to align Eigen3 with Eigen2 changes.
