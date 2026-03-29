@@ -1,8 +1,8 @@
-"""Process VOO (S&P 500 ETF) data: read raw CSV, compute technical indicators,
-output production-ready CSV and PKL.
+"""Process single-instrument CSV: compute technical indicators, output
+production-ready CSV and PKL.
 
 Replicates the exact Eigen2 VBA indicator calculations for three base series
-extracted from the VOO CSV:
+extracted from the input CSV:
   - Close price  (Column B)
   - PE NTM       (Column D)
   - VIX          (Column AF)
@@ -15,7 +15,7 @@ Input CSV layout (Excel-style references):
     Rows 1-3   : headers / metadata (skipped)
     Row 4+     : trading-day data
     Column A   : date
-    Column B   : VOO price at close
+    Column B   : price at close
     Column D   : PE NTM (next-twelve-months P/E)
     Column AF  : VIX
 
@@ -32,9 +32,9 @@ import argparse
 from datetime import datetime
 
 # --- Configuration ---
-INPUT_FILE = 'VOO_Master.csv'
-OUTPUT_FILE_PKL = 'VOO_Processed_OUTPUT.pkl'
-OUTPUT_FILE_CSV = 'VOO_Processed_OUTPUT.csv'
+INPUT_FILE = 'Eigen3mono_master_v1.csv'
+OUTPUT_FILE_PKL = 'Eigen3_Processed_OUTPUT.pkl'
+OUTPUT_FILE_CSV = 'Eigen3_Processed_OUTPUT.csv'
 
 # CSV structure (Excel-style references)
 CSV_HEADER_ROW = 2    # 0-indexed; Excel row 3 is the header, data starts row 4
@@ -222,8 +222,8 @@ def print_progress(current, total, start_time, label='Series'):
 # Main processing
 # ---------------------------------------------------------------------------
 
-def process_voo_csv(input_file, output_csv, output_pkl):
-    """Read the VOO CSV, compute indicators for each base series, write output."""
+def process_csv(input_file, output_csv, output_pkl):
+    """Read the input CSV, compute indicators for each base series, write output."""
 
     if not os.path.exists(input_file):
         print(f"Error: Input file not found: {input_file}")
@@ -307,24 +307,24 @@ def process_voo_csv(input_file, output_csv, output_pkl):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Process VOO data: compute indicators and output production CSV/PKL',
+        description='Process mono CSV: compute indicators and output production CSV/PKL',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   python process_eigen_data.py
-  python process_eigen_data.py --input my_voo_data.csv
-  python process_eigen_data.py --input my_voo_data.csv --output-csv out.csv --output-pkl out.pkl
+  python process_eigen_data.py --input my_data.csv
+  python process_eigen_data.py --input my_data.csv --output-csv out.csv --output-pkl out.pkl
         """,
     )
     parser.add_argument('--input', type=str, default=INPUT_FILE,
-                        help=f'Input VOO CSV file (default: {INPUT_FILE})')
+                        help=f'Input CSV file (default: {INPUT_FILE})')
     parser.add_argument('--output-csv', type=str, default=OUTPUT_FILE_CSV,
                         help=f'Output CSV file (default: {OUTPUT_FILE_CSV})')
     parser.add_argument('--output-pkl', type=str, default=OUTPUT_FILE_PKL,
                         help=f'Output PKL file (default: {OUTPUT_FILE_PKL})')
 
     args = parser.parse_args()
-    process_voo_csv(args.input, args.output_csv, args.output_pkl)
+    process_csv(args.input, args.output_csv, args.output_pkl)
 
 
 if __name__ == '__main__':
