@@ -11,7 +11,7 @@ from typing import Tuple, Optional
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-import jax.tree_util as jtu
+import jax.tree as jtree
 import chex
 from evorl.agent import Agent, AgentState
 from evorl.types import PyTreeData
@@ -94,8 +94,8 @@ class TradingAgent(Agent):
         params = TradingNetworkParams(
             actor_params=actor_params,
             critic_params=critic_params,
-            target_actor_params=jtu.tree_map(jnp.copy, actor_params),
-            target_critic_params=jtu.tree_map(jnp.copy, critic_params),
+            target_actor_params=jtree.map(jnp.copy, actor_params),
+            target_critic_params=jtree.map(jnp.copy, critic_params),
         )
 
         return AgentState(params=params)
@@ -299,7 +299,7 @@ def soft_target_update(
 
     def update_tree(target, source):
         """Update target tree with soft update from source"""
-        return jtu.tree_map(
+        return jtree.map(
             lambda t, s: tau * s + (1 - tau) * t,
             target,
             source,

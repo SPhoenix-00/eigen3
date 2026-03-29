@@ -199,8 +199,8 @@ class TradingERLWorkflow:
         return TradingNetworkParams(
             actor_params=child_actor,
             critic_params=child_critic,
-            actor_target_params=child_actor_target,
-            critic_target_params=child_critic_target,
+            target_actor_params=child_actor_target,
+            target_critic_params=child_critic_target,
         )
 
     def _mutate(
@@ -243,8 +243,8 @@ class TradingERLWorkflow:
         return TradingNetworkParams(
             actor_params=mutated_actor,
             critic_params=mutated_critic,
-            actor_target_params=params.actor_target_params,
-            critic_target_params=params.critic_target_params,
+            target_actor_params=params.target_actor_params,
+            target_critic_params=params.target_critic_params,
         )
 
     def _collect_experience(

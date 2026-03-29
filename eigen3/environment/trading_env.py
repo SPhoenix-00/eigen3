@@ -56,11 +56,9 @@ class TradingEnv(Env):
 
     Supports single-stock (mono) and multi-stock modes:
     - Multiple buys allowed on the same stock
-    - No sell until min_holding_period **steps** (time-axis row indices) since the last buy.
-      Each env step advances one row in ``data_array`` / ``data_array_full``. That is **not**
-      implicit calendar math: if your table is one row per **trading** day only, then 30 means
-      30 trading sessions (fewer than 30 calendar days). For ~30 **calendar** days on that
-      cadence you must either use a daily calendar grid in the data or choose a larger integer.
+    - No sell until min_holding_period **calendar days** since the last buy.
+      Calendar gaps are resolved via ``dates_ordinal``, a 1-D array mapping each
+      row index to its ordinal day number (``datetime.date.toordinal()``).
     - All remaining positions liquidated at episode end
 
     Observation: [context_days, num_columns, num_features] normalized window
@@ -92,6 +90,7 @@ class TradingEnv(Env):
         conviction_scaling_power: float = 1.25,
         observation_noise_std: float = 0.01,
         is_training: bool = True,
+        dates_ordinal=None,
     ):
         """Initialize trading environment.
 
@@ -104,10 +103,9 @@ class TradingEnv(Env):
                 (episode length = trading_period_days + settlement_period_days).
             settlement_period_days: Extra days after the trading window (no new opens);
                 use 0 for a single continuous fiscal-year-style window.
-            min_holding_period: Minimum number of env steps (data time-index rows) since the
-                last buy on a stock before any sell (target hit, discretionary, or liquidation).
-                Semantics match whatever one row represents in your dataset (trading day vs
-                calendar day, etc.); the env does not inspect wall-clock dates.
+            min_holding_period: Minimum **calendar days** since the last buy on a stock
+                before any sell (target hit, discretionary, or liquidation). Calendar
+                gaps between rows are handled by ``dates_ordinal``.
             max_positions: Maximum concurrent positions
             inaction_penalty: Penalty per day with no positions
             coefficient_threshold: Minimum coefficient to open position
@@ -120,11 +118,18 @@ class TradingEnv(Env):
             conviction_scaling_power: Power for conviction scaling
             observation_noise_std: Multiplicative obs noise when is_training
             is_training: If True, apply observation noise
+            dates_ordinal: 1-D int array [num_days] of ``date.toordinal()`` values.
+                When ``None``, defaults to ``arange(num_days)`` (1 row = 1 calendar day).
         """
         self.data_array = jnp.array(data_array, dtype=jnp.float32)
         self.data_array_full = jnp.array(data_array_full, dtype=jnp.float32)
         self.norm_mean = jnp.array(norm_stats['mean'], dtype=jnp.float32)
         self.norm_std = jnp.array(norm_stats['std'], dtype=jnp.float32)
+
+        num_days = len(data_array)
+        if dates_ordinal is None:
+            dates_ordinal = jnp.arange(num_days, dtype=jnp.int32)
+        self.dates_ordinal = jnp.array(dates_ordinal, dtype=jnp.int32)
 
         self.context_window_days = context_window_days
         self.trading_period_days = trading_period_days
@@ -146,7 +151,7 @@ class TradingEnv(Env):
 
         # Compute valid episode ranges
         self.min_start_idx = context_window_days
-        self.max_start_idx = len(data_array) - trading_period_days - settlement_period_days
+        self.max_start_idx = num_days - trading_period_days - settlement_period_days
 
         # Total episode length
         self.episode_length = trading_period_days + settlement_period_days
@@ -349,6 +354,17 @@ class TradingEnv(Env):
 
         return normalized
 
+    def _calendar_gap(self, step_a: chex.Array, step_b: chex.Array) -> chex.Array:
+        """Calendar-day difference ``dates_ordinal[step_a] - dates_ordinal[step_b]``.
+
+        Both indices are clamped to valid bounds so that out-of-range sentinels
+        (e.g. ``-1`` or ``-inf`` cast to int) do not cause OOB reads.
+        """
+        n = self.dates_ordinal.shape[0]
+        a = jnp.clip(step_a, 0, n - 1).astype(jnp.int32)
+        b = jnp.clip(step_b, 0, n - 1).astype(jnp.int32)
+        return self.dates_ordinal[a] - self.dates_ordinal[b]
+
     def _gain_reward_scalar(
         self,
         entry_price: chex.Array,
@@ -393,14 +409,14 @@ class TradingEnv(Env):
                 return position, 0.0, 0, 0, 0.0
 
             def active_branch():
-                # No sell until >= min_holding_period env steps since the most recent buy
-                # for this stock (across all active lots); steps == data row indices.
+                # No sell until >= min_holding_period calendar days since the most
+                # recent buy for this stock (across all active lots).
                 # `positions` is the pre-update snapshot, closed over from
                 # the outer scope -- JAX treats it as a constant in vmap.
                 same_stock_active = (positions[:, 0] == stock_idx) & (positions[:, 5] > 0.5)
                 last_buy_step = jnp.max(jnp.where(same_stock_active, positions[:, 1], -1))
-                days_since_last_buy = env_state.current_step - last_buy_step
-                can_sell_window = days_since_last_buy >= self.min_holding_period
+                cal_days = self._calendar_gap(env_state.current_step, last_buy_step)
+                can_sell_window = cal_days >= self.min_holding_period
 
                 # Get current price for the stock
                 actual_col_idx = self.investable_start_col + stock_idx
@@ -480,7 +496,8 @@ class TradingEnv(Env):
         same_s = (positions[:, 0].astype(jnp.int32) == stock_idx) & (positions[:, 5] > 0.5)
         has = jnp.any(same_s)
         last_buy = jnp.max(jnp.where(same_s, positions[:, 1], -jnp.inf))
-        can_sell = has & (env_state.current_step - last_buy >= self.min_holding_period)
+        cal_days = self._calendar_gap(env_state.current_step, last_buy)
+        can_sell = has & (cal_days >= self.min_holding_period)
         eligible = same_s & can_sell
 
         n_int = jnp.sum(eligible.astype(jnp.int32))

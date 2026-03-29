@@ -426,7 +426,7 @@ class TestRewardSystem:
 
 
 class TestMonoRules:
-    """Test mono trading rules: multiple buys same stock, 20-trading-day sell
+    """Test mono trading rules: multiple buys same stock, 20-calendar-day sell
     restriction, end-of-episode liquidation."""
 
     @staticmethod
@@ -471,8 +471,8 @@ class TestMonoRules:
         assert state.env_state.num_active_positions >= 2, \
             "Should allow second buy in same stock"
 
-    def test_mono_no_sell_before_20_trading_days(self):
-        """No position can close before 20 trading days since the last buy."""
+    def test_mono_no_sell_before_20_calendar_days(self):
+        """No position can close before 20 calendar days since the last buy."""
         env = self._create_mono_env()
         key = random.PRNGKey(0)
         state = env.reset(key)
@@ -500,8 +500,8 @@ class TestMonoRules:
             assert state.env_state.num_trades == 0, \
                 f"Position sold at step {6 + i} -- before 20 trading days since last buy"
 
-    def test_mono_sell_after_20_trading_days(self):
-        """Positions can close once 20 trading days have passed since last buy."""
+    def test_mono_sell_after_20_calendar_days(self):
+        """Positions can close once 20 calendar days have passed since last buy."""
         env = self._create_mono_env()
         key = random.PRNGKey(0)
         state = env.reset(key)
@@ -575,6 +575,71 @@ class TestMonoRules:
         state = env.step(state, sell_all)
         assert state.env_state.num_active_positions == 0
         assert state.env_state.num_trades >= 1
+
+    def test_calendar_day_hold_with_gaps(self):
+        """Min-hold uses calendar days, not step indices.
+
+        If rows are trading days only (weekdays), 10 rows span ~14 calendar
+        days.  With min_holding_period=12, step-based logic would block sells
+        for 12 rows, but calendar-day logic should allow selling after 9 rows
+        because 9 trading days ~= 13 calendar days (Mon-Fri grid with two
+        weekends).
+        """
+        import numpy as np
+
+        num_rows = 200
+        # Build a weekday-only calendar: Mon-Fri, skip Sat/Sun.
+        start_ordinal = 738000  # arbitrary anchor
+        ordinals = []
+        d = start_ordinal
+        while len(ordinals) < num_rows:
+            # Python weekday: 0=Mon ... 6=Sun; ordinal % 7 gives day-of-week
+            # relative offset.  Simpler: just skip +2 every 5 days.
+            ordinals.append(d)
+            d += 1
+            # Skip weekends (after Friday advance by 2 extra days).
+            if len(ordinals) % 5 == 0:
+                d += 2
+        dates_ordinal = np.array(ordinals, dtype=np.int32)
+
+        prices = jnp.linspace(100, 200, num_rows).reshape(-1, 1)
+        data_array = jnp.ones((num_rows, 1, 5)).at[:, :, 0].set(prices)
+        data_array_full = jnp.zeros((num_rows, 1, 9)).at[:, :, 1].set(prices)
+        norm_stats = {'mean': jnp.zeros(5), 'std': jnp.ones(5)}
+
+        env = TradingEnv(
+            data_array, data_array_full, norm_stats,
+            num_investable_stocks=1,
+            investable_start_col=0,
+            max_positions=1,
+            min_holding_period=12,
+            min_sale_target=1.0,
+            max_sale_target=50.0,
+            dates_ordinal=dates_ordinal,
+        )
+
+        key = random.PRNGKey(0)
+        state = env.reset(key)
+
+        buy = jnp.array([[5.0, 1.0, 0.0]])   # 1% target, easily hit
+        hold = jnp.array([[0.0, 1.0, 0.0]])
+
+        state = env.step(state, buy)
+        assert state.env_state.num_active_positions >= 1
+
+        # After 8 steps (< 12 calendar days), sell should still be blocked.
+        for _ in range(8):
+            state = env.step(state, hold)
+        assert state.env_state.num_trades == 0, \
+            "Sold too early — 8 trading days < 12 calendar days"
+
+        # Steps 9-15: calendar gap crosses 12 days; should sell.
+        for _ in range(7):
+            state = env.step(state, hold)
+            if state.env_state.num_trades > 0:
+                break
+        assert state.env_state.num_trades > 0, \
+            "Should have sold — enough calendar days have passed"
 
 
 @pytest.mark.slow

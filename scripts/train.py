@@ -74,12 +74,12 @@ def main(cfg: DictConfig) -> None:
         if column_index is not None:
             load_kwargs["column_index"] = int(column_index)
             logger.info(f"Using column_index={column_index}")
-        data_array, data_array_full, norm_stats = load_trading_data(str(path), **load_kwargs)
+        data_array, data_array_full, norm_stats, dates_ordinal = load_trading_data(str(path), **load_kwargs)
     elif path.is_file() and path.suffix.lower() in (".pkl", ".pickle", ".csv"):
         logger.info(f"Loading mono table from: {data_path}")
         mono_ch = int(OmegaConf.select(cfg, "env.mono_num_channels", default=18))
         mono_hdr = OmegaConf.select(cfg, "env.mono_csv_header", default=0)
-        data_array, data_array_full, norm_stats = load_trading_data(
+        data_array, data_array_full, norm_stats, dates_ordinal = load_trading_data(
             str(path),
             mono_num_channels=mono_ch,
             mono_csv_header=mono_hdr,
@@ -88,7 +88,7 @@ def main(cfg: DictConfig) -> None:
         num_cols = int(OmegaConf.select(cfg, "env.num_columns", default=117))
         num_feat = int(OmegaConf.select(cfg, "env.num_features_obs", default=5))
         logger.info(f"Using synthetic data ({num_cols} columns, F={num_feat})")
-        data_array, data_array_full, norm_stats = create_synthetic_data(
+        data_array, data_array_full, norm_stats, dates_ordinal = create_synthetic_data(
             num_days=2000,
             num_columns=num_cols,
             num_features_obs=num_feat,
@@ -121,6 +121,7 @@ def main(cfg: DictConfig) -> None:
         hurdle_rate=_env_cfg("hurdle_rate", 0.006),
         conviction_scaling_power=_env_cfg("conviction_scaling_power", 1.25),
         observation_noise_std=_env_cfg("observation_noise_std", 0.01),
+        dates_ordinal=dates_ordinal,
     )
 
     try:

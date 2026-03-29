@@ -13,7 +13,7 @@ class TestSyntheticData:
 
     def test_create_synthetic_data(self):
         """Test creating synthetic data"""
-        data_obs, data_full, norm_stats = create_synthetic_data(
+        data_obs, data_full, norm_stats, dates_ord = create_synthetic_data(
             num_days=500,
             num_columns=100,
             seed=42,
@@ -35,8 +35,8 @@ class TestSyntheticData:
 
     def test_synthetic_data_deterministic(self):
         """Test that same seed produces same data"""
-        data1_obs, data1_full, _ = create_synthetic_data(seed=42)
-        data2_obs, data2_full, _ = create_synthetic_data(seed=42)
+        data1_obs, data1_full, *_ = create_synthetic_data(seed=42)
+        data2_obs, data2_full, *_ = create_synthetic_data(seed=42)
 
         # Should be identical
         assert jnp.allclose(data1_obs, data2_obs)
@@ -44,15 +44,15 @@ class TestSyntheticData:
 
     def test_synthetic_data_different_seeds(self):
         """Test that different seeds produce different data"""
-        data1_obs, _, _ = create_synthetic_data(seed=0)
-        data2_obs, _, _ = create_synthetic_data(seed=999)
+        data1_obs, *_ = create_synthetic_data(seed=0)
+        data2_obs, *_ = create_synthetic_data(seed=999)
 
         # Should be different
         assert not jnp.allclose(data1_obs, data2_obs)
 
     def test_synthetic_data_reasonable_values(self):
         """Test that synthetic data has reasonable values"""
-        data_obs, data_full, _ = create_synthetic_data()
+        data_obs, data_full, *_ = create_synthetic_data()
 
         # Prices should be positive
         prices_obs = data_obs[:, :, 0]  # Close prices
@@ -373,7 +373,7 @@ class TestDataPipeline:
     def test_complete_pipeline(self):
         """Test complete data loading pipeline"""
         # Create synthetic data
-        data_obs, data_full, _ = create_synthetic_data(
+        data_obs, data_full, *_ = create_synthetic_data(
             num_days=1200,
             num_columns=100,
             seed=42,
@@ -413,7 +413,7 @@ class TestDataPipeline:
     def test_pipeline_with_save_load(self):
         """Test pipeline with save and reload"""
         # Create and process data
-        data_obs, data_full, _ = create_synthetic_data(seed=42)
+        data_obs, data_full, *_ = create_synthetic_data(seed=42)
 
         data_obs_np = np.array(data_obs)
         data_full_np = np.array(data_full)
@@ -447,7 +447,7 @@ class TestIntegrationWithEnvironment:
         from eigen3.environment import TradingEnv
 
         # Create data
-        data_obs, data_full, norm_stats = create_synthetic_data(
+        data_obs, data_full, norm_stats, _ = create_synthetic_data(
             num_days=1000,
             num_columns=669,  # Full size
             seed=42,
@@ -479,7 +479,7 @@ class TestLargeScale:
     def test_full_scale_data(self):
         """Test loading full-scale data"""
         # Create full-scale synthetic data
-        data_obs, data_full, norm_stats = create_synthetic_data(
+        data_obs, data_full, norm_stats, _ = create_synthetic_data(
             num_days=2000,
             num_columns=669,
             seed=42,

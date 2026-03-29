@@ -4,7 +4,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 import jax.random as random
-import jax.tree_util as jtu
+import jax.tree as jtree
 from evorl.envs import Box
 from evorl.sample_batch import SampleBatch
 
@@ -24,7 +24,7 @@ def _bump_float_leaves(tree, eps: float = 0.1):
             return x + jnp.asarray(eps, dtype=x.dtype)
         return x
 
-    return jtu.tree_map(f, tree)
+    return jtree.map(f, tree)
 
 
 def create_test_agent():

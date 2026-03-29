@@ -386,7 +386,7 @@ def create_synthetic_data(
     num_columns: int = 117,
     num_features_obs: int = 5,
     seed: int = 42,
-) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, Dict, np.ndarray]:
     """Create synthetic stock data for testing
 
     Args:
@@ -396,7 +396,7 @@ def create_synthetic_data(
         seed: Random seed
 
     Returns:
-        Tuple of (data_obs, data_full, norm_stats)
+        Tuple of (data_obs, data_full, norm_stats, dates_ordinal)
     """
     np.random.seed(seed)
 
@@ -441,13 +441,16 @@ def create_synthetic_data(
     data_obs = jnp.array(data_obs)
     data_full = jnp.array(data_full)
 
-    return data_obs, data_full, norm_stats
+    # Sequential ordinals: 1 row = 1 calendar day for synthetic data.
+    dates_ordinal = np.arange(num_days, dtype=np.int32)
+
+    return data_obs, data_full, norm_stats, dates_ordinal
 
 
 def load_eigen2_data(
     eigen2_data_path: str,
     use_identity_norm: bool = True,
-) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, Dict, np.ndarray]:
     """Load data from Eigen2 format (pre-exported npy/npz or directory).
 
     Eigen2 uses identity normalization (mean=0, std=1); Instance Normalization
@@ -459,7 +462,7 @@ def load_eigen2_data(
         use_identity_norm: If True, return norm_stats mean=0, std=1 (Eigen2 default)
 
     Returns:
-        Tuple of (data_obs, data_full, norm_stats)
+        Tuple of (data_obs, data_full, norm_stats, dates_ordinal)
     """
     data_path = Path(eigen2_data_path)
 
@@ -505,9 +508,18 @@ def load_eigen2_data(
     data_obs = jnp.array(data_obs)
     data_full = jnp.array(data_full)
 
-    print(f"Loaded {data_obs.shape[0]} days, {data_obs.shape[1]} columns")
+    num_days = data_obs.shape[0]
 
-    return data_obs, data_full, norm_stats
+    # Try dates.npy alongside the data arrays; fallback to sequential ordinals.
+    dates_path = (data_path if data_path.is_dir() else data_path.parent) / "dates.npy"
+    if dates_path.exists():
+        dates_ordinal = np.load(dates_path).astype(np.int32)
+    else:
+        dates_ordinal = np.arange(num_days, dtype=np.int32)
+
+    print(f"Loaded {num_days} days, {data_obs.shape[1]} columns")
+
+    return data_obs, data_full, norm_stats, dates_ordinal
 
 
 def load_trading_data(
@@ -516,7 +528,7 @@ def load_trading_data(
     column_index: Optional[int] = None,
     mono_num_channels: int = MONO_DEFAULT_NUM_CHANNELS,
     mono_csv_header: Optional[int] = 0,
-) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, Dict, np.ndarray]:
     """Load trading data for Eigen3.
 
     - **Directory** with ``data_array.npy`` / ``data_array_full.npy``: Eigen2-style arrays.
@@ -530,7 +542,7 @@ def load_trading_data(
         mono_csv_header: Mono CSV: ``pd.read_csv(..., header=...)``
 
     Returns:
-        Tuple of (data_obs, data_full, norm_stats)
+        Tuple of (data_obs, data_full, norm_stats, dates_ordinal)
     """
     path = Path(filepath)
     if path.is_file() and path.suffix.lower() in (".pkl", ".pickle", ".csv"):
@@ -543,9 +555,9 @@ def load_trading_data(
         )
 
     if path.is_dir():
-        data_obs, data_full, norm_stats = load_eigen2_data(str(path), use_identity_norm)
+        data_obs, data_full, norm_stats, dates_ordinal = load_eigen2_data(str(path), use_identity_norm)
     elif path.suffix == '.npy' and path.parent.exists():
-        data_obs, data_full, norm_stats = load_eigen2_data(str(path.parent), use_identity_norm)
+        data_obs, data_full, norm_stats, dates_ordinal = load_eigen2_data(str(path.parent), use_identity_norm)
     else:
         raise FileNotFoundError(f"Unsupported path or missing data: {filepath}")
 
@@ -560,4 +572,4 @@ def load_trading_data(
         elif 'mean' in norm_stats and norm_stats['mean'].ndim == 1:
             norm_stats = norm_stats  # Keep as-is for 1D stats
 
-    return data_obs, data_full, norm_stats
+    return data_obs, data_full, norm_stats, dates_ordinal

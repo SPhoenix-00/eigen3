@@ -25,11 +25,13 @@ def test_load_mono_table_with_date_column():
         p = Path(f.name)
     try:
         df.to_csv(p, index=False)
-        obs, full, stats = load_mono_table(str(p), num_channels=18, csv_header=0)
+        obs, full, stats, dates_ord = load_mono_table(str(p), num_channels=18, csv_header=0)
         assert obs.shape == (n, 18, 1)
         assert full.shape == (n, 18, 9)
         assert stats["mean"].shape == (18, 1)
         assert float(full[0, 0, 1]) == float(obs[0, 0, 0])
+        assert dates_ord.shape == (n,)
+        assert dates_ord.dtype == np.int32
     finally:
         p.unlink(missing_ok=True)
 
@@ -46,20 +48,22 @@ def test_load_trading_data_dispatches_csv():
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "t.csv"
         df.to_csv(p, index=False)
-        obs, full, _ = load_trading_data(str(p))
+        obs, full, _, dates_ord = load_trading_data(str(p))
         assert obs.shape == (n, 18, 1)
+        assert dates_ord.shape == (n,)
 
 
 def test_create_synthetic_f1():
-    obs, full, st = create_synthetic_data(
+    obs, full, st, dates_ord = create_synthetic_data(
         num_days=100, num_columns=18, num_features_obs=1, seed=0
     )
     assert obs.shape == (100, 18, 1)
     assert st["mean"].shape == (18, 1)
+    assert dates_ord.shape == (100,)
 
 
 def test_env_mono_shapes_match_config():
-    obs, full, stats = create_synthetic_data(
+    obs, full, stats, _ = create_synthetic_data(
         num_days=500, num_columns=18, num_features_obs=1, seed=2
     )
     env = TradingEnv(
@@ -91,10 +95,10 @@ def test_env_mono_shapes_match_config():
     batch = 2
     k1, k2, k3 = jax.random.split(key, 3)
     x = jax.random.normal(k1, (batch, 151, 18, 1))
-    a = jax.random.normal(k2, (batch, 1, 2))
+    a = jax.random.normal(k2, (batch, 1, 3))
     ap = actor.init(k3, x, train=False, return_attention_weights=False)
     out, _ = actor.apply(ap, x, train=False, return_attention_weights=False)
-    assert out.shape == (batch, 1, 2)
+    assert out.shape == (batch, 1, 3)
     k4, _ = jax.random.split(k3)
     cp = critic.init(k4, x, a, train=False)
     q = critic.apply(cp, x, a, train=False)

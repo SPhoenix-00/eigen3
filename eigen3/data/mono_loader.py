@@ -11,11 +11,33 @@ import pandas as pd
 MONO_DEFAULT_NUM_CHANNELS = 18
 
 
+def _parse_dates_to_ordinal(series: pd.Series) -> np.ndarray:
+    """Parse mixed-format date strings to int32 ordinal days.
+
+    Handles MM/DD/YYYY, MM-DD-YY, and other formats that pandas can infer.
+    """
+    parsed = pd.to_datetime(series, format="mixed", dayfirst=False)
+    if parsed.isna().any():
+        n_bad = int(parsed.isna().sum())
+        raise ValueError(
+            f"_parse_dates_to_ordinal: {n_bad} unparseable date(s) in series"
+        )
+    ordinals = np.array(
+        [d.toordinal() for d in parsed.dt.date], dtype=np.int32
+    )
+    return ordinals
+
+
 def load_mono_table(
     filepath: str,
     num_channels: int = MONO_DEFAULT_NUM_CHANNELS,
     csv_header: Optional[int] = 0,
-) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, Dict, np.ndarray]:
+    """Load mono spreadsheet and return (obs, full, norm_stats, dates_ordinal).
+
+    ``dates_ordinal`` is a 1-D int32 array of length T holding the ordinal day
+    number for each row, parsed from column A or the DataFrame index.
+    """
     path = Path(filepath)
     if not path.is_file():
         raise FileNotFoundError(f"Mono table file not found: {path}")
@@ -30,13 +52,23 @@ def load_mono_table(
 
     ncols = df.shape[1]
     if ncols >= num_channels + 1:
+        # Column 0 is the date column; data columns follow.
+        date_series = df.iloc[:, 0]
         block = df.iloc[:, 1 : 1 + num_channels]
     elif ncols == num_channels:
+        # No date column; try parsing the DataFrame index.
+        date_series = pd.Series(df.index.astype(str))
         block = df.iloc[:, :num_channels]
     else:
         raise ValueError(
             f"load_mono_table: need {num_channels} or {num_channels + 1} columns, got {ncols}"
         )
+
+    try:
+        dates_ordinal = _parse_dates_to_ordinal(date_series)
+    except Exception:
+        # Fallback: sequential ordinals (1 row = 1 calendar day).
+        dates_ordinal = np.arange(df.shape[0], dtype=np.int32)
 
     values = np.asarray(block, dtype=np.float64)
     values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0)
@@ -60,4 +92,4 @@ def load_mono_table(
 
     print(f"Loaded mono table from {path}: {t} rows, {num_channels} channels, F=1")
 
-    return jnp.array(data_obs), jnp.array(data_full), norm_stats
+    return jnp.array(data_obs), jnp.array(data_full), norm_stats, dates_ordinal
