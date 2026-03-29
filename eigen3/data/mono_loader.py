@@ -1,4 +1,4 @@
-﻿"""Mono spreadsheet loader: A=date, B=price (ch0), C-S=context -> [T,18,1] obs."""
+"""Mono spreadsheet loader: A=date, B=price (ch0), C-S=context -> [T,18,1] obs."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -48,10 +48,10 @@ def load_mono_table(
     t = values.shape[0]
     data_obs = values.astype(np.float32)[:, :, np.newaxis]
 
+    # The environment reads price from data_full[step, col, 1].
+    # Only channel 0 (the tradable price) is populated.
     data_full = np.zeros((t, num_channels, 9), dtype=np.float32)
-    price = data_obs[:, 0, 0]
-    data_full[:, 0, 1] = price
-    data_full[:, 0, 2] = price
+    data_full[:, 0, 1] = data_obs[:, 0, 0]
 
     norm_stats = {
         "mean": jnp.zeros((num_channels, 1), dtype=jnp.float32),

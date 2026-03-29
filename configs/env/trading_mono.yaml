@@ -1,9 +1,6 @@
 # Mono table: A=date, B=price (tradable, channel 0), C–S = 17 context → 18 channels, F=1
 # Override data_path to your PKL/CSV.
 
-defaults:
-  - trading
-
 context_window_days: 151
 trading_period_days: 125
 settlement_period_days: 30

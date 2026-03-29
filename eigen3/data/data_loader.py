@@ -152,8 +152,8 @@ class StockDataLoader:
             self._compute_normalization_stats()
         else:
             self.norm_stats = {
-                'mean': np.zeros(self.config.num_features_obs),
-                'std': np.ones(self.config.num_features_obs),
+                'mean': np.zeros((num_columns, self.config.num_features_obs)),
+                'std': np.ones((num_columns, self.config.num_features_obs)),
             }
 
         # Split train/val
@@ -167,8 +167,7 @@ class StockDataLoader:
         Args:
             df: DataFrame with stock data
         """
-        # Expected columns
-        required_cols = ['date', 'ticker', 'open', 'high', 'low', 'close', 'volume']
+        required_cols = ['date', 'ticker', 'close', 'volume']
 
         for col in required_cols:
             if col not in df.columns:
@@ -195,10 +194,7 @@ class StockDataLoader:
         ticker_to_idx = {ticker: idx for idx, ticker in enumerate(tickers)}
 
         # Initialize arrays
-        # Observation features: close, volume, returns, volatility, etc.
         data_obs = np.zeros((num_days, num_tickers, self.config.num_features_obs))
-
-        # Full features: open, close, high, low, volume, etc.
         data_full = np.zeros((num_days, num_tickers, self.config.num_features_full))
 
         # Fill arrays
@@ -209,41 +205,24 @@ class StockDataLoader:
                 ticker = row['ticker']
                 ticker_idx = ticker_to_idx[ticker]
 
-                # Extract price and volume data
-                open_price = row['open']
-                high_price = row['high']
-                low_price = row['low']
                 close_price = row['close']
                 volume = row['volume']
 
-                # Compute additional features
-                # Returns (will be NaN for first day)
                 if day_idx > 0:
-                    prev_close = data_full[day_idx - 1, ticker_idx, 1]  # Previous close
-                    returns = (close_price - prev_close) / prev_close if prev_close > 0 else 0.0
+                    prev_price = data_full[day_idx - 1, ticker_idx, 1]
+                    returns = (close_price - prev_price) / prev_price if prev_price > 0 else 0.0
                 else:
                     returns = 0.0
 
-                # Volatility (high - low) / close
-                volatility = (high_price - low_price) / close_price if close_price > 0 else 0.0
-
-                # Observation features (5 features used during trading)
+                # Observation features
                 data_obs[day_idx, ticker_idx, 0] = close_price
-                data_obs[day_idx, ticker_idx, 1] = volume
-                data_obs[day_idx, ticker_idx, 2] = returns
-                data_obs[day_idx, ticker_idx, 3] = volatility
-                data_obs[day_idx, ticker_idx, 4] = (close_price - open_price) / open_price if open_price > 0 else 0.0
+                if self.config.num_features_obs >= 2:
+                    data_obs[day_idx, ticker_idx, 1] = volume
+                if self.config.num_features_obs >= 3:
+                    data_obs[day_idx, ticker_idx, 2] = returns
 
-                # Full features (9 features including OHLC for reward calculation)
-                data_full[day_idx, ticker_idx, 0] = open_price
+                # Price for reward calculation (env reads index 1)
                 data_full[day_idx, ticker_idx, 1] = close_price
-                data_full[day_idx, ticker_idx, 2] = high_price
-                data_full[day_idx, ticker_idx, 3] = low_price
-                data_full[day_idx, ticker_idx, 4] = volume
-                data_full[day_idx, ticker_idx, 5] = returns
-                data_full[day_idx, ticker_idx, 6] = volatility
-                data_full[day_idx, ticker_idx, 7] = (high_price - open_price) / open_price if open_price > 0 else 0.0
-                data_full[day_idx, ticker_idx, 8] = (open_price - low_price) / open_price if open_price > 0 else 0.0
 
         # Replace NaNs and Infs
         data_obs = np.nan_to_num(data_obs, nan=0.0, posinf=0.0, neginf=0.0)
@@ -257,8 +236,8 @@ class StockDataLoader:
             self._compute_normalization_stats()
         else:
             self.norm_stats = {
-                'mean': np.zeros(self.config.num_features_obs),
-                'std': np.ones(self.config.num_features_obs),
+                'mean': np.zeros((num_tickers, self.config.num_features_obs)),
+                'std': np.ones((num_tickers, self.config.num_features_obs)),
             }
 
         # Split train/val
@@ -267,23 +246,13 @@ class StockDataLoader:
         print("Data processing complete.")
 
     def _compute_normalization_stats(self) -> None:
-        """Compute mean and std for normalization"""
-        # Compute statistics over all days and columns
-        # Shape: [num_features]
-        mean = np.mean(self.data_array_obs, axis=(0, 1))
-        std = np.std(self.data_array_obs, axis=(0, 1))
-
-        # Avoid division by zero
-        std = np.where(std < 1e-8, 1.0, std)
-
-        self.norm_stats = {
-            'mean': mean,
-            'std': std,
-        }
-
-        print(f"Normalization stats computed:")
-        print(f"  Mean: {mean}")
-        print(f"  Std:  {std}")
+        """Disabled — global normalization produces (F,) stats incompatible
+        with the (C, F) convention used everywhere else. Use identity norm
+        (normalize=False) and rely on Instance Norm inside FeatureExtractor."""
+        raise NotImplementedError(
+            "Global normalization (normalize=True) is disabled. "
+            "Set normalize=False and rely on Instance Norm in the network."
+        )
 
     def _split_train_val(self) -> None:
         """Split data into training and validation sets"""
@@ -458,20 +427,10 @@ def create_synthetic_data(
     if num_features_obs >= 5:
         data_obs[:, :, 4] = intra
 
-    # Create full features (OHLC + volume + derived)
+    # The environment reads price from data_full[step, col, 1].
+    # Only channel 0 (the investable price) is populated.
     data_full = np.zeros((num_days, num_columns, 9))
-    data_full[:, :, 0] = prices * (1 + np.random.randn(num_days, num_columns) * 0.001)  # Open
-    data_full[:, :, 1] = prices  # Close
-    data_full[:, :, 2] = prices * (1 + np.abs(np.random.randn(num_days, num_columns)) * 0.01)  # High
-    data_full[:, :, 3] = prices * (1 - np.abs(np.random.randn(num_days, num_columns)) * 0.01)  # Low
-    if num_features_obs >= 2:
-        data_full[:, :, 4] = data_obs[:, :, 1]  # Volume
-    if num_features_obs >= 3:
-        data_full[:, :, 5] = data_obs[:, :, 2]  # Returns
-    if num_features_obs >= 4:
-        data_full[:, :, 6] = data_obs[:, :, 3]  # Volatility
-    data_full[:, :, 7] = np.random.randn(num_days, num_columns) * 0.005  # High-Open
-    data_full[:, :, 8] = np.random.randn(num_days, num_columns) * 0.005  # Open-Low
+    data_full[:, 0, 1] = prices[:, 0]
 
     norm_stats = {
         'mean': jnp.zeros((num_columns, num_features_obs), dtype=jnp.float32),

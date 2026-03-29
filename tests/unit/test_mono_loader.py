@@ -30,7 +30,6 @@ def test_load_mono_table_with_date_column():
         assert full.shape == (n, 18, 9)
         assert stats["mean"].shape == (18, 1)
         assert float(full[0, 0, 1]) == float(obs[0, 0, 0])
-        assert float(full[0, 0, 2]) == float(obs[0, 0, 0])
     finally:
         p.unlink(missing_ok=True)
 

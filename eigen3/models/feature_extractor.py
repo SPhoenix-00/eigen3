@@ -86,14 +86,16 @@ class FeatureExtractor(nn.Module):
 
     def setup(self):
         """Initialize submodules"""
-        # CNN layer
-        self.conv1 = nn.Conv(
-            features=self.cnn_filters,
-            kernel_size=(self.cnn_kernel_size,),
-            padding='SAME',
-            name='conv1'
-        )
-        self.bn1 = nn.BatchNorm(name='bn1')
+        self._use_cnn = self.num_features > 1
+
+        if self._use_cnn:
+            self.conv1 = nn.Conv(
+                features=self.cnn_filters,
+                kernel_size=(self.cnn_kernel_size,),
+                padding='SAME',
+                name='conv1'
+            )
+            self.bn1 = nn.BatchNorm(name='bn1')
 
         # LSTM
         self.lstm = BiLSTM(
@@ -159,7 +161,7 @@ class FeatureExtractor(nn.Module):
         """
         time_steps = x_chunk.shape[1]
 
-        # Reshape for CNN: [batch, chunk_size, num_features, time_steps]
+        # Reshape: [batch, chunk_size, num_features, time_steps]
         x_chunk = jnp.transpose(x_chunk, (0, 2, 3, 1))
 
         # Flatten batch and chunk dimensions: [batch*chunk_size, num_features, time_steps]
@@ -171,16 +173,21 @@ class FeatureExtractor(nn.Module):
         var = jnp.var(x_chunk, axis=2, keepdims=True) + 1e-5
         x_chunk = (x_chunk - mean) * jax.lax.rsqrt(var)
 
-        # CNN across features (with optional gradient checkpointing)
-        if train and self.use_remat:
-            x_chunk = remat(lambda x: self._cnn_block(x, train))(x_chunk)
+        if self._use_cnn:
+            # CNN across features (with optional gradient checkpointing)
+            if train and self.use_remat:
+                x_chunk = remat(lambda x: self._cnn_block(x, train))(x_chunk)
+            else:
+                x_chunk = self._cnn_block(x_chunk, train)
+
+            # Reshape for LSTM: [batch*chunk_size, cnn_filters, num_features]
+            x_chunk = jnp.transpose(x_chunk, (0, 2, 1))
         else:
-            x_chunk = self._cnn_block(x_chunk, train)
+            # F=1: skip CNN, feed time series directly to LSTM
+            # [batch*chunk_size, 1, time_steps] → [batch*chunk_size, time_steps, 1]
+            x_chunk = jnp.transpose(x_chunk, (0, 2, 1))
 
-        # Reshape for LSTM: [batch*chunk_size, time_steps, cnn_filters]
-        x_chunk = jnp.transpose(x_chunk, (0, 2, 1))
-
-        # LSTM across time (with optional gradient checkpointing)
+        # LSTM (with optional gradient checkpointing)
         if train and self.use_remat:
             lstm_out = remat(lambda x: self._lstm_block(x, train))(x_chunk)
         else:
@@ -245,7 +252,11 @@ def test_feature_extractor():
     """Test the FeatureExtractor implementation"""
     import jax.random as random
 
-    # Create model (Eigen2: 117 columns, 151 context days)
+    key = random.PRNGKey(0)
+    batch_size = 2
+    context_days = 151
+
+    # --- Eigen2 path: 117 columns, F=5 (uses CNN) ---
     model = FeatureExtractor(
         num_columns=117,
         num_features=5,
@@ -253,38 +264,42 @@ def test_feature_extractor():
         lstm_hidden_size=128,
         lstm_num_layers=2,
         column_chunk_size=64,
-        use_remat=False  # Disable for testing
+        use_remat=False,
     )
 
-    # Create dummy input
-    key = random.PRNGKey(0)
-    batch_size = 2
-    context_days = 151
     x = random.normal(key, (batch_size, context_days, 117, 5))
-
-    # Initialize parameters
     params = model.init(key, x, train=False)
-
-    # Forward pass
     output = model.apply(params, x, train=False)
 
     print(f"Input shape: {x.shape}")
     print(f"Output shape: {output.shape}")
-    print(f"Expected output shape: ({batch_size}, 117, 256)")
-
     assert output.shape == (batch_size, 117, 256), f"Output shape mismatch: {output.shape}"
-    print("✓ FeatureExtractor test passed!")
+    print("✓ FeatureExtractor (F=5, CNN) test passed!")
 
     # Test with gradient checkpointing
-    model_remat = FeatureExtractor(
-        num_columns=117,
-        num_features=5,
-        use_remat=True
-    )
+    model_remat = FeatureExtractor(num_columns=117, num_features=5, use_remat=True)
     params_remat = model_remat.init(key, x, train=False)
     output_remat = model_remat.apply(params_remat, x, train=True)
+    print(f"✓ Gradient checkpointing (F=5) test passed! Output shape: {output_remat.shape}")
 
-    print(f"✓ Gradient checkpointing test passed! Output shape: {output_remat.shape}")
+    # --- Mono path: 18 columns, F=1 (skips CNN, LSTM on raw time series) ---
+    model_mono = FeatureExtractor(
+        num_columns=18,
+        num_features=1,
+        lstm_hidden_size=128,
+        lstm_num_layers=2,
+        column_chunk_size=64,
+        use_remat=False,
+    )
+
+    x_mono = random.normal(key, (batch_size, context_days, 18, 1))
+    params_mono = model_mono.init(key, x_mono, train=False)
+    output_mono = model_mono.apply(params_mono, x_mono, train=False)
+
+    print(f"Mono input shape: {x_mono.shape}")
+    print(f"Mono output shape: {output_mono.shape}")
+    assert output_mono.shape == (batch_size, 18, 256), f"Mono output shape mismatch: {output_mono.shape}"
+    print("✓ FeatureExtractor (F=1, no CNN) test passed!")
 
     return model, params, output
 

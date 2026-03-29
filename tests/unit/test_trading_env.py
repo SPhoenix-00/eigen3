@@ -19,12 +19,9 @@ def create_test_data(num_days=1000, num_columns=669):
     data_array = jnp.ones((num_days, num_columns, 5))
     data_array = data_array.at[:, :, 0].set(prices)  # Close prices
 
-    # Create full data (9 features)
-    data_array_full = jnp.ones((num_days, num_columns, 9))
-    data_array_full = data_array_full.at[:, :, 1].set(prices)  # Close
-    data_array_full = data_array_full.at[:, :, 2].set(prices * 1.02)  # High
-    data_array_full = data_array_full.at[:, :, 0].set(prices * 0.99)  # Open
-    data_array_full = data_array_full.at[:, :, 3].set(prices * 0.98)  # Low
+    # Price data for reward calculation (env reads index 1)
+    data_array_full = jnp.zeros((num_days, num_columns, 9))
+    data_array_full = data_array_full.at[:, :, 1].set(prices)
 
     norm_stats = {
         'mean': jnp.zeros(5),
@@ -197,9 +194,8 @@ class TestPositionManagement:
         data_array = jnp.ones((num_days, 669, 5))
         data_array = data_array.at[:, :, 0].set(prices)
 
-        data_array_full = jnp.ones((num_days, 669, 9))
+        data_array_full = jnp.zeros((num_days, 669, 9))
         data_array_full = data_array_full.at[:, :, 1].set(prices)
-        data_array_full = data_array_full.at[:, :, 2].set(prices * 1.1)  # High always higher
 
         norm_stats = {'mean': jnp.zeros(5), 'std': jnp.ones(5)}
 
@@ -230,9 +226,8 @@ class TestPositionManagement:
         prices = jnp.ones((num_days, 669, 1)) * 100.0
         data_array = jnp.ones((num_days, 669, 5))
         data_array = data_array.at[:, :, 0].set(prices[:, :, 0])
-        data_array_full = jnp.ones((num_days, 669, 9))
+        data_array_full = jnp.zeros((num_days, 669, 9))
         data_array_full = data_array_full.at[:, :, 1].set(prices[:, :, 0])
-        data_array_full = data_array_full.at[:, :, 2].set(prices[:, :, 0])  # High = Close
         norm_stats = {'mean': jnp.zeros(5), 'std': jnp.ones(5)}
 
         env = TradingEnv(data_array, data_array_full, norm_stats)
@@ -379,9 +374,8 @@ class TestRewardSystem:
         data_array = jnp.ones((num_days, 669, 5))
         data_array = data_array.at[:, :, 0].set(prices)
 
-        data_array_full = jnp.ones((num_days, 669, 9))
+        data_array_full = jnp.zeros((num_days, 669, 9))
         data_array_full = data_array_full.at[:, :, 1].set(prices)
-        data_array_full = data_array_full.at[:, :, 2].set(prices * 1.05)
 
         norm_stats = {'mean': jnp.zeros(5), 'std': jnp.ones(5)}
 
@@ -432,11 +426,8 @@ class TestMonoRules:
         prices = jnp.linspace(100, 200, num_days).reshape(-1, 1)
         data_array = jnp.ones((num_days, 1, 5))
         data_array = data_array.at[:, :, 0].set(prices)
-        data_array_full = jnp.ones((num_days, 1, 9))
-        data_array_full = data_array_full.at[:, :, 1].set(prices)       # Close
-        data_array_full = data_array_full.at[:, :, 2].set(prices * 1.1) # High (10% above)
-        data_array_full = data_array_full.at[:, :, 0].set(prices * 0.99)
-        data_array_full = data_array_full.at[:, :, 3].set(prices * 0.98)
+        data_array_full = jnp.zeros((num_days, 1, 9))
+        data_array_full = data_array_full.at[:, :, 1].set(prices)
         norm_stats = {'mean': jnp.zeros(5), 'std': jnp.ones(5)}
         defaults = dict(
             num_investable_stocks=1,
@@ -526,9 +517,8 @@ class TestMonoRules:
         prices = jnp.ones((num_days, 1)) * 100.0
         data_array = jnp.ones((num_days, 1, 5))
         data_array = data_array.at[:, :, 0].set(prices)
-        data_array_full = jnp.ones((num_days, 1, 9))
+        data_array_full = jnp.zeros((num_days, 1, 9))
         data_array_full = data_array_full.at[:, :, 1].set(prices)
-        data_array_full = data_array_full.at[:, :, 2].set(prices)  # High = Close
         norm_stats = {'mean': jnp.zeros(5), 'std': jnp.ones(5)}
 
         env = TradingEnv(

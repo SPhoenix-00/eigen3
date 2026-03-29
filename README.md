@@ -22,7 +22,7 @@ Eigen3 combines Deep Reinforcement Learning (DDPG) with Evolutionary Algorithms 
 ### Environment
 - **TradingEnv**: JAX-native stock trading simulator (multi-stock default; mono via `configs/env/trading_mono.yaml`)
 - Default data layout: 117 columns, 108 investable from column 9; 151 **trading-day** context windows
-- **Exits**: No forced max-holding exit. Target-based sells use the daily high vs. each lot’s target, only after `min_holding_period` **trading days** since the **last buy** for that stock. Additional buys on the same stock are allowed (up to `max_positions` lots). Any open lots are **liquidated at the episode’s last step** at the close.
+- **Exits**: No forced max-holding exit. Target-based sells trigger when the price reaches the lot’s target, only after `min_holding_period` **trading days** since the **last buy** for that stock. Additional buys on the same stock are allowed (up to `max_positions` lots). Any open lots are **liquidated at the episode’s last step** at the current price.
 - Hurdle rate, conviction scaling, optional observation noise; fixed-size position table
 
 ### Training
@@ -114,7 +114,7 @@ Use Hydra **`env=trading`** (override the default) for this layout.
 Table layout: **column A = date**, **B = price** (sole tradable series; P&L uses this channel), **C–S = 17 context columns** → **18 numeric channels**, **one feature per channel (F=1)**.
 
 - Save as **`.csv`** (date in first column) or **`.pkl`** (either 19 columns with date first, or 18 columns with date as the index).
-- `load_trading_data` detects `.pkl` / `.csv` files and returns shapes **`[T, 18, 1]`** and **`[T, 18, 9]`** (only channel 0 is filled for reward OHLC-style indices; high equals close when no intraday bar).
+- `load_trading_data` detects `.pkl` / `.csv` files and returns shapes **`[T, 18, 1]`** and **`[T, 18, 9]`** (only channel 0's price slot is populated for reward calculation).
 - Implementation: [`eigen3/data/mono_loader.py`](eigen3/data/mono_loader.py).
 
 Default Hydra env is **`trading_mono`** ([`configs/env/trading_mono.yaml`](configs/env/trading_mono.yaml)). Set `env.data_path` to your file (pickle files are gitignored by default).

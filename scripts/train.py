@@ -31,6 +31,9 @@ def _build_networks(cfg: DictConfig):
     use_remat_a = OmegaConf.select(cfg, "agent.actor_network.use_remat", default=True)
     use_remat_c = OmegaConf.select(cfg, "agent.critic_network.use_remat", default=True)
 
+    min_st = float(_env("min_sale_target", 10.0))
+    max_st = float(_env("max_sale_target", 50.0))
+
     actor = Actor(
         num_columns=nc,
         num_features=nf,
@@ -38,6 +41,8 @@ def _build_networks(cfg: DictConfig):
         investable_start_col=istart,
         column_chunk_size=chunk,
         use_remat=use_remat_a,
+        min_sale_target=min_st,
+        max_sale_target=max_st,
     )
     critic = DoubleCritic(
         num_columns=nc,

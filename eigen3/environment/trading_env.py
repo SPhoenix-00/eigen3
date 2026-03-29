@@ -66,8 +66,8 @@ class TradingEnv(Env):
 
     def __init__(
         self,
-        data_array: chex.Array,  # [num_days, num_columns, 5] for observations
-        data_array_full: chex.Array,  # [num_days, num_columns, 9] for rewards
+        data_array: chex.Array,  # [num_days, num_columns, F] observations
+        data_array_full: chex.Array,  # [num_days, num_columns, 9] price at index 1
         norm_stats: dict,  # {'mean': array, 'std': array}
         context_window_days: int = 151,
         trading_period_days: int = 125,
@@ -91,7 +91,7 @@ class TradingEnv(Env):
 
         Args:
             data_array: Observation data [num_days, num_columns, num_features]
-            data_array_full: Full data for rewards [num_days, num_columns, 9]
+            data_array_full: Price data for rewards [num_days, num_columns, 9]; price at index 1
             norm_stats: Normalization statistics {'mean', 'std'}
             context_window_days: Lookback window (default 151)
             trading_period_days: Days to open new positions
@@ -364,28 +364,25 @@ class TradingEnv(Env):
                 days_since_last_buy = env_state.current_step - last_buy_step
                 can_sell_window = days_since_last_buy >= self.min_holding_period
 
-                # Get current stock data
+                # Get current price for the stock
                 actual_col_idx = self.investable_start_col + stock_idx
                 current_data = self.data_array_full[env_state.current_step, actual_col_idx]
 
-                day_high = current_data[2]
-                close_price = current_data[1]
-                is_valid = jnp.isfinite(close_price)
+                price = current_data[1]
+                is_valid = jnp.isfinite(price)
 
-                target_hit = day_high >= target_price
+                target_hit = price >= target_price
                 is_last_step = env_state.current_step >= env_state.end_step - 1
 
-                # Exit on: invalid data, end-of-episode liquidation, or
-                # target hit after the sell window opens.
                 exit_on_target = can_sell_window & target_hit
                 should_exit = (~is_valid) | is_last_step | exit_on_target
 
-                # Target price if genuinely sold on target; close price for
-                # liquidation or invalid-data exits.
+                # Exit at target when target is hit; at current price for
+                # liquidation; at entry price for invalid-data exits.
                 exit_price = jax.lax.select(
                     exit_on_target,
                     target_price,
-                    jax.lax.select(is_valid, close_price, entry_price)
+                    jax.lax.select(is_valid, price, entry_price)
                 )
 
                 gain_pct = ((exit_price - entry_price) / entry_price) * 100.0
@@ -476,10 +473,9 @@ class TradingEnv(Env):
 
         # Mono: Allow buying more even when holding (removed has_position check)
 
-        # Get stock data
         actual_col_idx = self.investable_start_col + best_stock_idx
         current_data = self.data_array_full[env_state.current_step, actual_col_idx]
-        entry_price = current_data[1]  # Close price
+        entry_price = current_data[1]
         data_valid = jnp.isfinite(entry_price) & (entry_price > 0)
 
         # Can open position?
@@ -531,9 +527,8 @@ def test_trading_env():
     # Add some price variation
     key = random.PRNGKey(0)
     prices = 100.0 + random.normal(key, (num_days, num_columns)) * 10
-    data_array = data_array.at[:, :, 0].set(prices)  # Close prices
-    data_array_full = data_array_full.at[:, :, 1].set(prices)  # Close in full data
-    data_array_full = data_array_full.at[:, :, 2].set(prices * 1.02)  # High prices
+    data_array = data_array.at[:, :, 0].set(prices)
+    data_array_full = data_array_full.at[:, :, 1].set(prices)
 
     norm_stats = {
         'mean': jnp.zeros((num_columns, 5)),
