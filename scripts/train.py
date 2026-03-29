@@ -10,6 +10,11 @@ import logging
 
 from eigen3.data import load_trading_data, create_synthetic_data
 from eigen3.data.splits import compute_train_val_holdout_split, slice_trading_timeline
+from eigen3.config import (
+    DEFAULT_CONVICTION_SCALING_POWER,
+    DEFAULT_HURDLE_RATE,
+    DEFAULT_LOSS_PENALTY_MULTIPLIER,
+)
 from eigen3.environment.trading_env import TradingEnv
 
 logger = logging.getLogger(__name__)
@@ -153,9 +158,13 @@ def main(cfg: DictConfig) -> None:
             max_sale_target=_env_cfg("max_sale_target", 50.0),
             investable_start_col=_env_cfg("investable_start_col", 9),
             num_investable_stocks=_env_cfg("num_investable_stocks", 108),
-            loss_penalty_multiplier=_env_cfg("loss_penalty_multiplier", 1.0),
-            hurdle_rate=_env_cfg("hurdle_rate", 0.006),
-            conviction_scaling_power=_env_cfg("conviction_scaling_power", 1.25),
+            loss_penalty_multiplier=_env_cfg(
+                "loss_penalty_multiplier", DEFAULT_LOSS_PENALTY_MULTIPLIER
+            ),
+            hurdle_rate=_env_cfg("hurdle_rate", DEFAULT_HURDLE_RATE),
+            conviction_scaling_power=_env_cfg(
+                "conviction_scaling_power", DEFAULT_CONVICTION_SCALING_POWER
+            ),
             observation_noise_std=_env_cfg("observation_noise_std", 0.01),
             is_training=is_training,
             dates_ordinal=dates_ord,

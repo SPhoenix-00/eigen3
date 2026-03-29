@@ -15,6 +15,12 @@ import chex
 from evorl.types import PyTreeData, pytree_field
 from evorl.envs import Env
 
+from eigen3.config import (
+    DEFAULT_CONVICTION_SCALING_POWER,
+    DEFAULT_HURDLE_RATE,
+    DEFAULT_LOSS_PENALTY_MULTIPLIER,
+)
+
 
 class TradingEnvState(PyTreeData):
     """Trading environment internal state (immutable). Synced with Eigen2."""
@@ -136,9 +142,9 @@ class TradingEnv(Env):
         max_sale_target: float = 50.0,
         investable_start_col: int = 9,
         num_investable_stocks: int = 108,
-        loss_penalty_multiplier: float = 1.0,
-        hurdle_rate: float = 0.006,
-        conviction_scaling_power: float = 1.25,
+        loss_penalty_multiplier: float = DEFAULT_LOSS_PENALTY_MULTIPLIER,
+        hurdle_rate: float = DEFAULT_HURDLE_RATE,
+        conviction_scaling_power: float = DEFAULT_CONVICTION_SCALING_POWER,
         observation_noise_std: float = 0.01,
         is_training: bool = True,
         dates_ordinal=None,

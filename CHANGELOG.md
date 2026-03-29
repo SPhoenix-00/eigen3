@@ -6,6 +6,7 @@ All notable changes to Eigen3 are documented here.
 
 ### Added
 
+- **`eigen3/config.py`**: Central defaults for trading reward shaping (`DEFAULT_HURDLE_RATE`, `DEFAULT_CONVICTION_SCALING_POWER`, `DEFAULT_LOSS_PENALTY_MULTIPLIER`). Used by `TradingEnv` constructor defaults and `scripts/train.py` Hydra fallbacks; **`configs/env/trading.yaml`** and **`configs/env/trading_mono.yaml`** mirror the same values for runs.
 - **`eigen3/data/splits.py`**: `compute_train_val_holdout_split`, `slice_trading_timeline`, `build_train_val_holdout_arrays`, and `TrainValHoldoutSplit`. Splits the timeline into **training**, a fixed **validation** row band immediately before holdout, and **holdout** (rows touched only by the **last** valid calendar episode, matching `TradingEnv` scheduling). Validation width is `ceil(validation_reserve_multiplier × episode_trading_rows)` for that final episode.
 - **`TradingERLWorkflow.eval_env`**: Optional second environment for fitness / validation rollouts (`_evaluate_agent`); defaults to `env` when omitted. Pair with a validation-only `TradingEnv` slice and `is_training=False` for evaluation.
 - **`StockDataLoader.get_holdout_data()`** and **`load_from_numpy(..., dates_ordinal=...)`**; processed **npz** may include `dates_ordinal` for reproducible splits on reload.
@@ -21,6 +22,7 @@ All notable changes to Eigen3 are documented here.
 
 ### Changed
 
+- **Reward shaping defaults**: Hurdle rate **0.5%** (`hurdle_rate: 0.005`), **linear** coefficient scaling (`conviction_scaling_power: 1.0`), loss penalty multiplier **1.25** (`loss_penalty_multiplier: 1.25`), applied via **`eigen3/config.py`** and **`configs/env/*.yaml`** (replacing prior 0.6% hurdle, power 1.25, multiplier 1.0).
 - **Data (train / validation / holdout)**:
   - **DataConfig** / **StockDataLoader**: Removed fractional `train_split` and unused Eigen2-style `validation_days` / `committee_holdout_days`. Splits now use `trading_period_days`, `settlement_period_days`, optional `episode_calendar_days`, and `validation_reserve_multiplier`, aligned with `TradingEnv` calendar episodes.
   - **scripts/train.py**: Computes the split from full loaded data, builds **train** and **validation** `TradingEnv` instances (observation noise on for train, off for val); **holdout** is excluded from both and reserved for final evaluation.
