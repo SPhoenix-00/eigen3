@@ -12,35 +12,45 @@ import jax.numpy as jnp
 import pandas as pd
 
 from eigen3.data.mono_loader import MONO_DEFAULT_NUM_CHANNELS, load_mono_table
+from eigen3.data.splits import (
+    TrainValHoldoutSplit,
+    compute_train_val_holdout_split,
+    slice_trading_timeline,
+)
 
 
 @dataclass
 class DataConfig:
     """Configuration for data loading and preprocessing
 
-    Aligned with Eigen2: skinny dataset 117 columns, context 151 days, three-tier split.
+    Train / validation / holdout follow :func:`compute_train_val_holdout_split`:
+    holdout is the last calendar episode only; validation is a fixed row band
+    just before it (width ``ceil(validation_reserve_multiplier * episode_trading_rows)``);
+    training is all earlier rows.
 
     Args:
         data_path: Path to data directory or file
         num_features_obs: Number of features for observations (default 5)
         num_features_full: Number of features for full data (default 9)
         num_columns: Number of stock columns (default 117, Eigen2 skinny)
-        context_window_days: Lookback window (default 151, Eigen2)
+        context_window_days: Lookback window (must match :class:`~eigen3.environment.trading_env.TradingEnv`)
+        trading_period_days: Default calendar span for an episode (must match env)
+        settlement_period_days: Extra rows after calendar window (must match env)
+        episode_calendar_days: If set, overrides calendar span for split logic only; else ``trading_period_days``
+        validation_reserve_multiplier: Validation band width = ceil(multiplier * last-episode trading rows)
         normalize: Whether to use global normalization (False = identity for Instance Norm in network)
-        train_split: Fraction of data for training (rest is validation)
-        validation_days: Days reserved for walk-forward validation (Eigen2: 503)
-        committee_holdout_days: Days reserved for committee/holdout (Eigen2: 252)
-        min_days: Minimum number of days required
+        min_days: Minimum number of days required before split
     """
     data_path: str
     num_features_obs: int = 5
     num_features_full: int = 9
     num_columns: int = 117  # Eigen2 TOTAL_COLUMNS (skinny)
     context_window_days: int = 151  # Eigen2 CONTEXT_WINDOW_DAYS
+    trading_period_days: int = 364
+    settlement_period_days: int = 0
+    episode_calendar_days: Optional[int] = None
+    validation_reserve_multiplier: float = 1.5
     normalize: bool = False  # Eigen2 uses identity norm; Instance Norm in FeatureExtractor
-    train_split: float = 0.8
-    validation_days: int = 503
-    committee_holdout_days: int = 252
     min_days: int = 1000
 
 
@@ -65,11 +75,15 @@ class StockDataLoader:
         self.data_array_full = None     # [days, columns, 9] - full features
         self.norm_stats = None          # Normalization statistics
 
-        # Train/validation split
+        # Train / validation / holdout (holdout excluded from train & val)
         self.train_data_obs = None
         self.train_data_full = None
         self.val_data_obs = None
         self.val_data_full = None
+        self.holdout_data_obs = None
+        self.holdout_data_full = None
+        self._dates_ordinal: Optional[np.ndarray] = None
+        self.split_info: Optional[TrainValHoldoutSplit] = None
 
     def load_from_csv(self, csv_path: Optional[str] = None) -> None:
         """Load data from CSV file(s)
@@ -121,12 +135,15 @@ class StockDataLoader:
         self,
         data_obs: np.ndarray,
         data_full: np.ndarray,
+        *,
+        dates_ordinal: Optional[np.ndarray] = None,
     ) -> None:
         """Load data from numpy arrays
 
         Args:
             data_obs: Observation data [days, columns, 5]
             data_full: Full data [days, columns, 9]
+            dates_ordinal: Optional length-``days`` calendar ordinals (defaults to 0..days-1)
         """
         print("Loading data from numpy arrays...")
 
@@ -143,6 +160,14 @@ class StockDataLoader:
                 f"Insufficient data: {num_days} days, need at least {self.config.min_days}"
             )
 
+        if dates_ordinal is None:
+            self._dates_ordinal = np.arange(num_days, dtype=np.int64)
+        else:
+            d = np.asarray(dates_ordinal, dtype=np.int64).reshape(-1)
+            if d.shape[0] != num_days:
+                raise ValueError("dates_ordinal length must match number of days")
+            self._dates_ordinal = d
+
         # Store as numpy arrays (will convert to JAX later)
         self.data_array_obs = data_obs
         self.data_array_full = data_full
@@ -156,7 +181,7 @@ class StockDataLoader:
                 'std': np.ones((num_columns, self.config.num_features_obs)),
             }
 
-        # Split train/val
+        # Split train / val / holdout
         self._split_train_val()
 
         print(f"Loaded {num_days} days, {num_columns} columns")
@@ -230,6 +255,7 @@ class StockDataLoader:
 
         self.data_array_obs = data_obs
         self.data_array_full = data_full
+        self._dates_ordinal = np.arange(data_obs.shape[0], dtype=np.int64)
 
         # Compute normalization
         if self.config.normalize:
@@ -240,7 +266,7 @@ class StockDataLoader:
                 'std': np.ones((num_tickers, self.config.num_features_obs)),
             }
 
-        # Split train/val
+        # Split train / val / holdout
         self._split_train_val()
 
         print("Data processing complete.")
@@ -254,18 +280,53 @@ class StockDataLoader:
             "Set normalize=False and rely on Instance Norm in the network."
         )
 
+    def _episode_calendar_days_for_split(self) -> int:
+        if self.config.episode_calendar_days is not None:
+            return int(self.config.episode_calendar_days)
+        return int(self.config.trading_period_days)
+
     def _split_train_val(self) -> None:
-        """Split data into training and validation sets"""
+        """Split into train, validation (pre-holdout band), and holdout (final episode only)."""
         num_days = self.data_array_obs.shape[0]
-        split_idx = int(num_days * self.config.train_split)
+        if self._dates_ordinal is None:
+            self._dates_ordinal = np.arange(num_days, dtype=np.int64)
 
-        # Sequential split (train first, then val)
-        self.train_data_obs = self.data_array_obs[:split_idx]
-        self.train_data_full = self.data_array_full[:split_idx]
-        self.val_data_obs = self.data_array_obs[split_idx:]
-        self.val_data_full = self.data_array_full[split_idx:]
+        self.split_info = compute_train_val_holdout_split(
+            num_days=num_days,
+            dates_ordinal=self._dates_ordinal,
+            context_window_days=int(self.config.context_window_days),
+            episode_calendar_days=self._episode_calendar_days_for_split(),
+            settlement_period_days=int(self.config.settlement_period_days),
+            validation_reserve_multiplier=float(self.config.validation_reserve_multiplier),
+        )
+        sp = self.split_info
 
-        print(f"Data split: {split_idx} train days, {num_days - split_idx} val days")
+        self.train_data_obs, self.train_data_full, _ = slice_trading_timeline(
+            self.data_array_obs,
+            self.data_array_full,
+            self._dates_ordinal,
+            0,
+            sp.train_end,
+        )
+        self.val_data_obs, self.val_data_full, _ = slice_trading_timeline(
+            self.data_array_obs,
+            self.data_array_full,
+            self._dates_ordinal,
+            sp.val_start,
+            sp.val_end,
+        )
+        self.holdout_data_obs, self.holdout_data_full, _ = slice_trading_timeline(
+            self.data_array_obs,
+            self.data_array_full,
+            self._dates_ordinal,
+            sp.holdout_start,
+            sp.holdout_end,
+        )
+
+        print(
+            f"Data split: train rows={sp.train_end}, val rows={sp.val_rows}, "
+            f"holdout rows={sp.holdout_rows} (last episode start={sp.last_episode_start})"
+        )
 
     def get_train_data(self) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:
         """Get training data as JAX arrays
@@ -309,6 +370,19 @@ class StockDataLoader:
 
         return data_obs, data_full, norm_stats
 
+    def get_holdout_data(self) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:
+        """Get holdout tail (final episode only) as JAX arrays — not for training or validation."""
+        if self.holdout_data_obs is None:
+            raise ValueError("Data not loaded. Call load_from_* first.")
+
+        data_obs = jnp.array(self.holdout_data_obs)
+        data_full = jnp.array(self.holdout_data_full)
+        norm_stats = {
+            'mean': jnp.array(self.norm_stats['mean']),
+            'std': jnp.array(self.norm_stats['std']),
+        }
+        return data_obs, data_full, norm_stats
+
     def get_all_data(self) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:
         """Get all data (train + val) as JAX arrays
 
@@ -342,13 +416,15 @@ class StockDataLoader:
         print(f"Saving processed data to {output_path}...")
 
         # Save as npz
-        np.savez(
-            output_path,
+        payload = dict(
             data_obs=self.data_array_obs,
             data_full=self.data_array_full,
             norm_mean=self.norm_stats['mean'],
             norm_std=self.norm_stats['std'],
         )
+        if self._dates_ordinal is not None:
+            payload["dates_ordinal"] = self._dates_ordinal
+        np.savez(output_path, **payload)
 
         print("Data saved successfully.")
 
@@ -374,8 +450,12 @@ class StockDataLoader:
             'mean': data['norm_mean'],
             'std': data['norm_std'],
         }
+        if 'dates_ordinal' in data.files:
+            self._dates_ordinal = np.asarray(data['dates_ordinal'], dtype=np.int64).reshape(-1)
+        else:
+            self._dates_ordinal = np.arange(self.data_array_obs.shape[0], dtype=np.int64)
 
-        # Split train/val
+        # Split train / val / holdout
         self._split_train_val()
 
         print(f"Loaded {self.data_array_obs.shape[0]} days, {self.data_array_obs.shape[1]} columns")

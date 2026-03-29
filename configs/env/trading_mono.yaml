@@ -7,6 +7,7 @@
 context_window_days: 151
 trading_period_days: 364
 settlement_period_days: 0
+validation_reserve_multiplier: 1.5
 min_holding_period: 30
 
 num_columns: 18

@@ -4,10 +4,12 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import jax
 import jax.numpy as jnp
+import numpy as np
 from pathlib import Path
 import logging
 
 from eigen3.data import load_trading_data, create_synthetic_data
+from eigen3.data.splits import compute_train_val_holdout_split, slice_trading_timeline
 from eigen3.environment.trading_env import TradingEnv
 
 logger = logging.getLogger(__name__)
@@ -97,37 +99,77 @@ def main(cfg: DictConfig) -> None:
 
     logger.info(f"Data shapes: obs {data_array.shape}, full {data_array_full.shape}")
 
-    logger.info("Creating trading environment...")
-
     def _env_cfg(key: str, default):
         return OmegaConf.select(cfg, f"env.{key}", default=default)
 
-    env = TradingEnv(
-        data_array=data_array,
-        data_array_full=data_array_full,
-        norm_stats=norm_stats,
-        context_window_days=_env_cfg("context_window_days", 151),
-        trading_period_days=_env_cfg("trading_period_days", 364),
-        settlement_period_days=_env_cfg("settlement_period_days", 0),
-        episode_calendar_days=_env_cfg("episode_calendar_days", None),
-        min_holding_period=_env_cfg("min_holding_period", 30),
-        max_positions=_env_cfg("max_positions", 10),
-        inaction_penalty=_env_cfg("inaction_penalty", 0.0),
-        coefficient_threshold=_env_cfg("coefficient_threshold", 1.0),
-        min_sale_target=_env_cfg("min_sale_target", 10.0),
-        max_sale_target=_env_cfg("max_sale_target", 50.0),
-        investable_start_col=_env_cfg("investable_start_col", 9),
-        num_investable_stocks=_env_cfg("num_investable_stocks", 108),
-        loss_penalty_multiplier=_env_cfg("loss_penalty_multiplier", 1.0),
-        hurdle_rate=_env_cfg("hurdle_rate", 0.006),
-        conviction_scaling_power=_env_cfg("conviction_scaling_power", 1.25),
-        observation_noise_std=_env_cfg("observation_noise_std", 0.01),
-        dates_ordinal=dates_ordinal,
+    logger.info("Computing train / validation / holdout timeline...")
+    dates_np = np.asarray(dates_ordinal, dtype=np.int64).reshape(-1)
+    num_days = int(data_array.shape[0])
+    ctx = int(_env_cfg("context_window_days", 151))
+    trading_days = int(_env_cfg("trading_period_days", 364))
+    settlement = int(_env_cfg("settlement_period_days", 0))
+    ep_cal = OmegaConf.select(cfg, "env.episode_calendar_days", default=None)
+    ep_cal_i = int(ep_cal) if ep_cal is not None else trading_days
+    val_mult = float(_env_cfg("validation_reserve_multiplier", 1.5))
+
+    split = compute_train_val_holdout_split(
+        num_days=num_days,
+        dates_ordinal=dates_np,
+        context_window_days=ctx,
+        episode_calendar_days=ep_cal_i,
+        settlement_period_days=settlement,
+        validation_reserve_multiplier=val_mult,
     )
+    logger.info(
+        f"Split: train rows [0, {split.train_end}), "
+        f"val rows [{split.val_start}, {split.val_end}), "
+        f"holdout rows [{split.holdout_start}, {split.holdout_end}) "
+        f"(final episode start index on full series: {split.last_episode_start})"
+    )
+
+    train_obs, train_full, dates_train = slice_trading_timeline(
+        data_array, data_array_full, dates_np, 0, split.train_end
+    )
+    val_obs, val_full, dates_val = slice_trading_timeline(
+        data_array, data_array_full, dates_np, split.val_start, split.val_end
+    )
+
+    logger.info("Creating trading environments (train + validation; holdout excluded)...")
+
+    def _make_env(data_obs, data_f, dates_ord, *, is_training: bool):
+        return TradingEnv(
+            data_array=data_obs,
+            data_array_full=data_f,
+            norm_stats=norm_stats,
+            context_window_days=ctx,
+            trading_period_days=trading_days,
+            settlement_period_days=settlement,
+            episode_calendar_days=_env_cfg("episode_calendar_days", None),
+            min_holding_period=_env_cfg("min_holding_period", 30),
+            max_positions=_env_cfg("max_positions", 10),
+            inaction_penalty=_env_cfg("inaction_penalty", 0.0),
+            coefficient_threshold=_env_cfg("coefficient_threshold", 1.0),
+            min_sale_target=_env_cfg("min_sale_target", 10.0),
+            max_sale_target=_env_cfg("max_sale_target", 50.0),
+            investable_start_col=_env_cfg("investable_start_col", 9),
+            num_investable_stocks=_env_cfg("num_investable_stocks", 108),
+            loss_penalty_multiplier=_env_cfg("loss_penalty_multiplier", 1.0),
+            hurdle_rate=_env_cfg("hurdle_rate", 0.006),
+            conviction_scaling_power=_env_cfg("conviction_scaling_power", 1.25),
+            observation_noise_std=_env_cfg("observation_noise_std", 0.01),
+            is_training=is_training,
+            dates_ordinal=dates_ord,
+        )
+
+    env = _make_env(train_obs, train_full, dates_train, is_training=True)
+    val_env = _make_env(val_obs, val_full, dates_val, is_training=False)
 
     try:
         state = env.reset(key)
-        logger.info(f"Env reset OK; obs shape: {state.obs.shape}")
+        logger.info(f"Train env reset OK; obs shape: {state.obs.shape}")
+        key, vkey = jax.random.split(key)
+        vstate = val_env.reset(vkey)
+        logger.info(f"Validation env reset OK; obs shape: {vstate.obs.shape}")
     except Exception as e:
         logger.warning(f"Env reset failed (evorl may not be installed): {e}")
 
@@ -147,8 +189,8 @@ def main(cfg: DictConfig) -> None:
         logger.warning(f"TradingAgent init skipped or failed: {e}")
 
     logger.info(
-        "Data and env wired. To run full training, instantiate TradingERLWorkflow "
-        "(eigen3.workflows.trading_workflow) with env, agent, evaluator, and config."
+        "Data and env wired. Instantiate TradingERLWorkflow with env=train env, "
+        "eval_env=val_env; reserve holdout for final offline evaluation only."
     )
 
 

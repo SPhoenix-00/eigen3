@@ -6,6 +6,11 @@ All notable changes to Eigen3 are documented here.
 
 ### Added
 
+- **`eigen3/data/splits.py`**: `compute_train_val_holdout_split`, `slice_trading_timeline`, `build_train_val_holdout_arrays`, and `TrainValHoldoutSplit`. Splits the timeline into **training**, a fixed **validation** row band immediately before holdout, and **holdout** (rows touched only by the **last** valid calendar episode, matching `TradingEnv` scheduling). Validation width is `ceil(validation_reserve_multiplier × episode_trading_rows)` for that final episode.
+- **`TradingERLWorkflow.eval_env`**: Optional second environment for fitness / validation rollouts (`_evaluate_agent`); defaults to `env` when omitted. Pair with a validation-only `TradingEnv` slice and `is_training=False` for evaluation.
+- **`StockDataLoader.get_holdout_data()`** and **`load_from_numpy(..., dates_ordinal=...)`**; processed **npz** may include `dates_ordinal` for reproducible splits on reload.
+- **`tests/unit/test_splits.py`**: Unit tests for the split helpers.
+- **`validation_reserve_multiplier`** in **`configs/env/trading.yaml`** and **`configs/env/trading_mono.yaml`** (default `1.5`).
 - **process_eigen_data.py**: Single-instrument data processing pipeline. Reads a mono CSV (Close price col B, PE NTM col D, VIX col AF; data starting row 4), computes the full Eigen2 VBA indicator stack (RSI, MACD, MACD Signal, TRIX, diff20DMA) for each of the three base series, and outputs a production-ready flat CSV/PKL with 18 columns (6 per series). Uses the exact same EMA initialisation and smoothing constants as Eigen2 for indicator parity.
 - **configs/env/trading_mono.yaml**: Single-stock (mono) Hydra overrides: one column, `investable_start_col: 0`, optional `column_index` for slicing a multi-column dataset, `min_holding_period` as the minimum **trading days** since the last buy before any target-based sell, and episode-end liquidation of all open lots.
 - **Mono trading tests** (`tests/unit/test_trading_env.py`): Coverage for multiple buys on the same symbol, 20-trading-day sell restriction after the last buy, target-based sell after the window opens, and end-of-episode liquidation.
@@ -16,8 +21,10 @@ All notable changes to Eigen3 are documented here.
 
 ### Changed
 
+- **Data (train / validation / holdout)**:
+  - **DataConfig** / **StockDataLoader**: Removed fractional `train_split` and unused Eigen2-style `validation_days` / `committee_holdout_days`. Splits now use `trading_period_days`, `settlement_period_days`, optional `episode_calendar_days`, and `validation_reserve_multiplier`, aligned with `TradingEnv` calendar episodes.
+  - **scripts/train.py**: Computes the split from full loaded data, builds **train** and **validation** `TradingEnv` instances (observation noise on for train, off for val); **holdout** is excluded from both and reserved for final evaluation.
 - **Data (Eigen2 sync)**:
-  - **DataConfig**: Defaults `num_columns=117`, `context_window_days=151`, `normalize=False`; added `validation_days`, `committee_holdout_days`.
   - **create_synthetic_data**: Default `num_columns=117`.
 - **Environment (Eigen2 sync)** (defaults and reward shaping; exit timing superseded by **Changed (mono / TradingEnv semantics)** below):
   - **TradingEnv**: Defaults `context_window_days=151`, `settlement_period_days=30`, `min_holding_period=20`, `investable_start_col=9`, `inaction_penalty=0`; added `hurdle_rate`, `conviction_scaling_power`, `observation_noise_std`, `is_training`; `rng_key` in state for observation noise.

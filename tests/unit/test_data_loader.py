@@ -4,6 +4,7 @@ import pytest
 import numpy as np
 import jax.numpy as jnp
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from eigen3.data import StockDataLoader, DataConfig, create_synthetic_data, load_eigen2_data
 
@@ -56,9 +57,10 @@ class TestSyntheticData:
 
         # Prices should be positive
         prices_obs = data_obs[:, :, 0]  # Close prices
-        prices_full = data_full[:, :, 1]  # Close prices
+        # Synthetic full tensor only sets price channel on column 0 (see create_synthetic_data)
+        prices_full_c0 = data_full[:, 0, 1]
         assert jnp.all(prices_obs > 0)
-        assert jnp.all(prices_full > 0)
+        assert jnp.all(prices_full_c0 > 0)
 
         # Volume should be positive
         volumes = data_obs[:, :, 1]
@@ -93,9 +95,11 @@ class TestDataLoaderInitialization:
 
         assert config.num_features_obs == 5
         assert config.num_features_full == 9
-        assert config.num_columns == 669
-        assert config.normalize == True
-        assert config.train_split == 0.8
+        assert config.num_columns == 117
+        assert config.normalize is False
+        assert config.context_window_days == 151
+        assert config.trading_period_days == 364
+        assert config.validation_reserve_multiplier == 1.5
         assert config.min_days == 1000
 
 
@@ -104,11 +108,17 @@ class TestLoadFromNumpy:
 
     def test_load_from_numpy(self):
         """Test loading data from numpy arrays"""
-        # Create test data
-        data_obs = np.random.randn(1000, 100, 5)
-        data_full = np.random.randn(1000, 100, 9)
+        # Create test data (long enough for default episode + validation + holdout)
+        data_obs = np.random.randn(400, 100, 5)
+        data_full = np.random.randn(400, 100, 9)
 
-        config = DataConfig(data_path="dummy", min_days=500)
+        config = DataConfig(
+            data_path="dummy",
+            min_days=300,
+            context_window_days=20,
+            trading_period_days=50,
+            episode_calendar_days=50,
+        )
         loader = StockDataLoader(config)
 
         loader.load_from_numpy(data_obs, data_full)
@@ -119,8 +129,8 @@ class TestLoadFromNumpy:
         assert loader.norm_stats is not None
 
         # Check shapes
-        assert loader.data_array_obs.shape == (1000, 100, 5)
-        assert loader.data_array_full.shape == (1000, 100, 9)
+        assert loader.data_array_obs.shape == (400, 100, 5)
+        assert loader.data_array_full.shape == (400, 100, 9)
 
     def test_load_from_numpy_validation(self):
         """Test validation of input shapes"""
@@ -158,102 +168,124 @@ class TestNormalization:
     """Test normalization computation"""
 
     def test_compute_normalization(self):
-        """Test normalization statistics computation"""
-        # Create data with known statistics
-        data_obs = np.ones((1000, 100, 5)) * 10.0
-        data_obs[:, :, 0] = 100.0  # Close price = 100
-        data_obs[:, :, 1] = 50.0   # Volume = 50
+        """Global normalization is disabled (identity norm + Instance Norm in network)."""
+        data_obs = np.ones((400, 100, 5)) * 10.0
+        data_full = np.random.randn(400, 100, 9)
 
-        data_full = np.random.randn(1000, 100, 9)
-
-        config = DataConfig(data_path="dummy", normalize=True, min_days=500)
+        config = DataConfig(
+            data_path="dummy",
+            normalize=True,
+            min_days=300,
+            context_window_days=20,
+            trading_period_days=50,
+            episode_calendar_days=50,
+        )
         loader = StockDataLoader(config)
-        loader.load_from_numpy(data_obs, data_full)
-
-        # Check stats computed
-        assert loader.norm_stats is not None
-        assert 'mean' in loader.norm_stats
-        assert 'std' in loader.norm_stats
-
-        # Mean should be close to [100, 50, 10, 10, 10]
-        mean = loader.norm_stats['mean']
-        assert np.isclose(mean[0], 100.0, atol=0.1)
-        assert np.isclose(mean[1], 50.0, atol=0.1)
+        with pytest.raises(NotImplementedError):
+            loader.load_from_numpy(data_obs, data_full)
 
     def test_normalization_no_division_by_zero(self):
-        """Test that normalization handles zero std"""
-        # Create data with zero variation in one feature
-        data_obs = np.ones((1000, 100, 5))
-        data_obs[:, :, 0] = 100.0  # Constant value
-        data_full = np.random.randn(1000, 100, 9)
+        """normalize=True still hits disabled global path."""
+        data_obs = np.ones((400, 100, 5))
+        data_full = np.random.randn(400, 100, 9)
 
-        config = DataConfig(data_path="dummy", normalize=True, min_days=500)
+        config = DataConfig(
+            data_path="dummy",
+            normalize=True,
+            min_days=300,
+            context_window_days=20,
+            trading_period_days=50,
+            episode_calendar_days=50,
+        )
         loader = StockDataLoader(config)
-        loader.load_from_numpy(data_obs, data_full)
-
-        # Std should be 1.0 where it would be zero
-        std = loader.norm_stats['std']
-        assert np.all(std > 0)  # No zeros
+        with pytest.raises(NotImplementedError):
+            loader.load_from_numpy(data_obs, data_full)
 
     def test_disable_normalization(self):
-        """Test disabling normalization"""
-        data_obs = np.random.randn(1000, 100, 5)
-        data_full = np.random.randn(1000, 100, 9)
+        """normalize=False uses identity per-(column, feature) stats."""
+        data_obs = np.random.randn(400, 100, 5)
+        data_full = np.random.randn(400, 100, 9)
 
-        config = DataConfig(data_path="dummy", normalize=False, min_days=500)
+        config = DataConfig(
+            data_path="dummy",
+            normalize=False,
+            min_days=300,
+            context_window_days=20,
+            trading_period_days=50,
+            episode_calendar_days=50,
+        )
         loader = StockDataLoader(config)
         loader.load_from_numpy(data_obs, data_full)
 
-        # Norm stats should still be None
-        assert loader.norm_stats is None
+        assert loader.norm_stats is not None
+        assert loader.norm_stats["mean"].shape == (100, 5)
+        assert loader.norm_stats["std"].shape == (100, 5)
 
 
 class TestTrainValSplit:
-    """Test train/validation splitting"""
+    """Test train / validation / holdout splitting (calendar-episode tail holdout)."""
 
-    def test_train_val_split(self):
-        """Test splitting data into train and validation"""
-        data_obs = np.random.randn(1000, 100, 5)
-        data_full = np.random.randn(1000, 100, 9)
+    @staticmethod
+    def _compact_config(min_days: int = 250) -> DataConfig:
+        return DataConfig(
+            data_path="dummy",
+            min_days=min_days,
+            context_window_days=20,
+            trading_period_days=50,
+            episode_calendar_days=50,
+            validation_reserve_multiplier=1.5,
+        )
 
-        config = DataConfig(data_path="dummy", train_split=0.8, min_days=500)
-        loader = StockDataLoader(config)
+    def test_train_val_holdout_split(self):
+        """Train, validation band, and holdout partition the timeline."""
+        n = 250
+        data_obs = np.random.randn(n, 100, 5)
+        data_full = np.random.randn(n, 100, 9)
+
+        loader = StockDataLoader(self._compact_config(min_days=n))
         loader.load_from_numpy(data_obs, data_full)
 
-        # Check split sizes
-        assert loader.train_data_obs.shape[0] == 800
-        assert loader.val_data_obs.shape[0] == 200
-        assert loader.train_data_full.shape[0] == 800
-        assert loader.val_data_full.shape[0] == 200
+        sp = loader.split_info
+        assert sp is not None
+        assert sp.train_end + sp.val_rows + sp.holdout_rows == n
+        assert loader.train_data_obs.shape[0] == sp.train_end
+        assert loader.val_data_obs.shape[0] == sp.val_rows
+        assert loader.holdout_data_obs.shape[0] == sp.holdout_rows
 
-    def test_different_split_ratios(self):
-        """Test different split ratios"""
-        data_obs = np.random.randn(1000, 100, 5)
-        data_full = np.random.randn(1000, 100, 9)
+    def test_validation_reserve_multiplier(self):
+        """Larger multiplier widens the validation band."""
+        n = 300
+        data_obs = np.random.randn(n, 100, 5)
+        data_full = np.random.randn(n, 100, 9)
 
-        # 70/30 split
-        config = DataConfig(data_path="dummy", train_split=0.7, min_days=500)
-        loader = StockDataLoader(config)
+        base = self._compact_config(min_days=n)
+        cfg_narrow = replace(base, validation_reserve_multiplier=1.5)
+        cfg_wide = replace(base, validation_reserve_multiplier=2.5)
+
+        loader_n = StockDataLoader(cfg_narrow)
+        loader_n.load_from_numpy(np.array(data_obs), np.array(data_full))
+        loader_w = StockDataLoader(cfg_wide)
+        loader_w.load_from_numpy(data_obs, data_full)
+
+        assert loader_w.val_data_obs.shape[0] > loader_n.val_data_obs.shape[0]
+
+    def test_sequential_prefix_suffix(self):
+        """Training is an initial prefix; val and holdout are disjoint tails."""
+        n = 250
+        data_obs = np.arange(n * 100 * 5).reshape(n, 100, 5).astype(float)
+        data_full = np.random.randn(n, 100, 9)
+
+        loader = StockDataLoader(self._compact_config(min_days=n))
         loader.load_from_numpy(data_obs, data_full)
 
-        assert loader.train_data_obs.shape[0] == 700
-        assert loader.val_data_obs.shape[0] == 300
-
-    def test_sequential_split(self):
-        """Test that split is sequential (not random)"""
-        # Create data with increasing values
-        data_obs = np.arange(1000 * 100 * 5).reshape(1000, 100, 5).astype(float)
-        data_full = np.random.randn(1000, 100, 9)
-
-        config = DataConfig(data_path="dummy", train_split=0.8, min_days=500)
-        loader = StockDataLoader(config)
-        loader.load_from_numpy(data_obs, data_full)
-
-        # Train should be first 800 days
-        assert np.array_equal(loader.train_data_obs, data_obs[:800])
-
-        # Val should be last 200 days
-        assert np.array_equal(loader.val_data_obs, data_obs[800:])
+        sp = loader.split_info
+        assert np.array_equal(loader.train_data_obs, data_obs[: sp.train_end])
+        assert np.array_equal(
+            loader.val_data_obs, data_obs[sp.val_start : sp.val_end]
+        )
+        assert np.array_equal(
+            loader.holdout_data_obs, data_obs[sp.holdout_start : sp.holdout_end]
+        )
 
 
 class TestJAXConversion:
@@ -261,10 +293,17 @@ class TestJAXConversion:
 
     def test_get_train_data(self):
         """Test getting training data as JAX arrays"""
-        data_obs = np.random.randn(1000, 100, 5)
-        data_full = np.random.randn(1000, 100, 9)
+        n = 250
+        data_obs = np.random.randn(n, 100, 5)
+        data_full = np.random.randn(n, 100, 9)
 
-        config = DataConfig(data_path="dummy", min_days=500)
+        config = DataConfig(
+            data_path="dummy",
+            min_days=n,
+            context_window_days=20,
+            trading_period_days=50,
+            episode_calendar_days=50,
+        )
         loader = StockDataLoader(config)
         loader.load_from_numpy(data_obs, data_full)
 
@@ -277,41 +316,70 @@ class TestJAXConversion:
         assert isinstance(norm_stats['mean'], jnp.ndarray)
         assert isinstance(norm_stats['std'], jnp.ndarray)
 
-        # Check shapes
-        assert jax_obs.shape == (800, 100, 5)
-        assert jax_full.shape == (800, 100, 9)
+        te = loader.split_info.train_end
+        assert jax_obs.shape == (te, 100, 5)
+        assert jax_full.shape == (te, 100, 9)
 
     def test_get_val_data(self):
         """Test getting validation data as JAX arrays"""
-        data_obs = np.random.randn(1000, 100, 5)
-        data_full = np.random.randn(1000, 100, 9)
+        n = 250
+        data_obs = np.random.randn(n, 100, 5)
+        data_full = np.random.randn(n, 100, 9)
 
-        config = DataConfig(data_path="dummy", min_days=500)
+        config = DataConfig(
+            data_path="dummy",
+            min_days=n,
+            context_window_days=20,
+            trading_period_days=50,
+            episode_calendar_days=50,
+        )
         loader = StockDataLoader(config)
         loader.load_from_numpy(data_obs, data_full)
 
         # Get JAX arrays
         jax_obs, jax_full, norm_stats = loader.get_val_data()
 
-        # Check shapes
-        assert jax_obs.shape == (200, 100, 5)
-        assert jax_full.shape == (200, 100, 9)
+        vr = loader.split_info.val_rows
+        assert jax_obs.shape == (vr, 100, 5)
+        assert jax_full.shape == (vr, 100, 9)
+
+    def test_get_holdout_data(self):
+        """Holdout tail is exposed for final evaluation only."""
+        n = 250
+        data_obs = np.random.randn(n, 100, 5)
+        data_full = np.random.randn(n, 100, 9)
+        config = DataConfig(
+            data_path="dummy",
+            min_days=n,
+            context_window_days=20,
+            trading_period_days=50,
+            episode_calendar_days=50,
+        )
+        loader = StockDataLoader(config)
+        loader.load_from_numpy(data_obs, data_full)
+        ho_obs, ho_full, _ = loader.get_holdout_data()
+        assert ho_obs.shape[0] == loader.split_info.holdout_rows
 
     def test_get_all_data(self):
         """Test getting all data as JAX arrays"""
-        data_obs = np.random.randn(1000, 100, 5)
-        data_full = np.random.randn(1000, 100, 9)
+        data_obs = np.random.randn(400, 100, 5)
+        data_full = np.random.randn(400, 100, 9)
 
-        config = DataConfig(data_path="dummy", min_days=500)
+        config = DataConfig(
+            data_path="dummy",
+            min_days=300,
+            context_window_days=20,
+            trading_period_days=50,
+            episode_calendar_days=50,
+        )
         loader = StockDataLoader(config)
         loader.load_from_numpy(data_obs, data_full)
 
         # Get all data
         jax_obs, jax_full, norm_stats = loader.get_all_data()
 
-        # Should have all 1000 days
-        assert jax_obs.shape == (1000, 100, 5)
-        assert jax_full.shape == (1000, 100, 9)
+        assert jax_obs.shape == (400, 100, 5)
+        assert jax_full.shape == (400, 100, 9)
 
     def test_get_data_before_loading(self):
         """Test error when accessing data before loading"""
@@ -335,10 +403,16 @@ class TestSaveLoad:
     def test_save_and_load_processed_data(self):
         """Test saving and loading processed data"""
         # Create data
-        data_obs = np.random.randn(1000, 100, 5)
-        data_full = np.random.randn(1000, 100, 9)
+        data_obs = np.random.randn(400, 100, 5)
+        data_full = np.random.randn(400, 100, 9)
 
-        config = DataConfig(data_path="dummy", min_days=500)
+        config = DataConfig(
+            data_path="dummy",
+            min_days=300,
+            context_window_days=20,
+            trading_period_days=50,
+            episode_calendar_days=50,
+        )
         loader1 = StockDataLoader(config)
         loader1.load_from_numpy(data_obs, data_full)
 
@@ -374,7 +448,7 @@ class TestDataPipeline:
         """Test complete data loading pipeline"""
         # Create synthetic data
         data_obs, data_full, *_ = create_synthetic_data(
-            num_days=1200,
+            num_days=500,
             num_columns=100,
             seed=42,
         )
@@ -386,9 +460,11 @@ class TestDataPipeline:
         # Create loader and load
         config = DataConfig(
             data_path="dummy",
-            train_split=0.8,
-            normalize=True,
-            min_days=1000,
+            normalize=False,
+            min_days=400,
+            context_window_days=20,
+            trading_period_days=50,
+            episode_calendar_days=50,
         )
         loader = StockDataLoader(config)
         loader.load_from_numpy(data_obs_np, data_full_np)
@@ -396,9 +472,9 @@ class TestDataPipeline:
         # Get training data
         train_obs, train_full, train_stats = loader.get_train_data()
 
-        # Check everything works
-        assert train_obs.shape == (960, 100, 5)
-        assert train_full.shape == (960, 100, 9)
+        te = loader.split_info.train_end
+        assert train_obs.shape == (te, 100, 5)
+        assert train_full.shape == (te, 100, 9)
         assert isinstance(train_obs, jnp.ndarray)
         assert 'mean' in train_stats
         assert 'std' in train_stats
@@ -413,12 +489,18 @@ class TestDataPipeline:
     def test_pipeline_with_save_load(self):
         """Test pipeline with save and reload"""
         # Create and process data
-        data_obs, data_full, *_ = create_synthetic_data(seed=42)
+        data_obs, data_full, *_ = create_synthetic_data(num_days=400, seed=42)
 
         data_obs_np = np.array(data_obs)
         data_full_np = np.array(data_full)
 
-        config = DataConfig(data_path="dummy", min_days=500)
+        config = DataConfig(
+            data_path="dummy",
+            min_days=300,
+            context_window_days=20,
+            trading_period_days=50,
+            episode_calendar_days=50,
+        )
         loader1 = StockDataLoader(config)
         loader1.load_from_numpy(data_obs_np, data_full_np)
 
@@ -489,22 +571,20 @@ class TestLargeScale:
         data_obs_np = np.array(data_obs)
         data_full_np = np.array(data_full)
 
-        # Load
+        # Load (default 151/364 episode params need ~2000+ days)
         config = DataConfig(data_path="dummy", min_days=1000)
         loader = StockDataLoader(config)
         loader.load_from_numpy(data_obs_np, data_full_np)
 
         # Get train data
         train_obs, train_full, train_stats = loader.get_train_data()
+        sp = loader.split_info
 
-        # Check shapes
-        assert train_obs.shape == (1600, 669, 5)
-        assert train_full.shape == (1600, 669, 9)
+        assert train_obs.shape == (sp.train_end, 669, 5)
+        assert train_full.shape == (sp.train_end, 669, 9)
 
-        # Check memory usage is reasonable (data should fit in memory)
-        # This is mainly to ensure JAX conversion doesn't explode memory
         val_obs, val_full, _ = loader.get_val_data()
-        assert val_obs.shape == (400, 669, 5)
+        assert val_obs.shape == (sp.val_rows, 669, 5)
 
 
 if __name__ == "__main__":

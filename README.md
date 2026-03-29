@@ -31,7 +31,7 @@ Eigen3 combines Deep Reinforcement Learning (DDPG) with Evolutionary Algorithms 
 ### Training
 - **Population-based ERL**: 16 agents with genetic operators
 - **DDPG updates**: Gradient-based learning with replay buffer
-- **Conservative evaluation**: Multi-slice validation
+- **Train / validation / holdout**: The timeline is split into three contiguous row ranges. **Holdout** is the tail of rows used only by the **last** valid calendar episode (same rules as `TradingEnv`; default primary window **364** inclusive calendar days via `dates_ordinal`). **Validation** is the `ceil(env.validation_reserve_multiplier × episode_trading_rows)` rows immediately before holdout, where `episode_trading_rows` is the trading row span of that final episode; `TradingEnv.reset` picks a **random** valid start inside that slice. **Training** is everything before the validation band. Configure `validation_reserve_multiplier` in `configs/env/trading.yaml` or `trading_mono.yaml`. See `eigen3.data.splits.compute_train_val_holdout_split` and `scripts/train.py`. For `TradingERLWorkflow`, pass `eval_env` set to a `TradingEnv` built on the validation slice only (`is_training=False`).
 
 ## Project Structure
 
@@ -101,11 +101,11 @@ Schema: 117 columns, 5 observation features, 9 full features. Load from a direct
 ```python
 from eigen3.data import load_trading_data, create_synthetic_data
 
-# From Eigen2-exported directory
-data_array, data_array_full, norm_stats = load_trading_data("data/raw")
+# From Eigen2-exported directory (includes dates_ordinal per row)
+data_array, data_array_full, norm_stats, dates_ordinal = load_trading_data("data/raw")
 
 # Or synthetic (117 columns, F=5, identity norm)
-data_array, data_array_full, norm_stats = create_synthetic_data(
+data_array, data_array_full, norm_stats, dates_ordinal = create_synthetic_data(
     num_days=2000, num_columns=117, num_features_obs=5, seed=42
 )
 ```

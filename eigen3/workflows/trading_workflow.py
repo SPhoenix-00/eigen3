@@ -74,6 +74,7 @@ class TradingERLWorkflow:
         evaluator: Evaluator,
         config: TradingWorkflowConfig,
         seed: int = 0,
+        eval_env: Optional[Env] = None,
     ):
         """Initialize the trading ERL workflow
 
@@ -83,8 +84,12 @@ class TradingERLWorkflow:
             evaluator: Evaluator for assessing agent fitness
             config: Workflow configuration
             seed: Random seed for reproducibility
+            eval_env: Optional environment for fitness / validation rollouts (defaults to ``env``).
+                Use a validation slice with ``is_training=False`` so evaluation matches held-out
+                protocol; keep ``env`` on the training timeline only.
         """
         self.env = env
+        self.eval_env = eval_env if eval_env is not None else env
         self.agent = agent
         self.evaluator = evaluator
         self.config = config
@@ -400,9 +405,9 @@ class TradingERLWorkflow:
         total_reward = 0.0
 
         for episode in range(self.config.eval_episodes):
-            # Reset environment
+            # Reset environment (validation / eval timeline — random episode in reserved band)
             key, reset_key = random.split(key)
-            env_state = self.env.reset(reset_key)
+            env_state = self.eval_env.reset(reset_key)
 
             episode_reward = 0.0
             done = False
@@ -420,7 +425,7 @@ class TradingERLWorkflow:
                 action = actions[0]
 
                 # Step environment
-                env_state = self.env.step(env_state, action)
+                env_state = self.eval_env.step(env_state, action)
                 episode_reward += float(env_state.reward)
                 done = bool(env_state.done)
                 step += 1
@@ -578,6 +583,7 @@ def create_trading_workflow(
     evaluator: Evaluator,
     config: Optional[TradingWorkflowConfig] = None,
     seed: int = 0,
+    eval_env: Optional[Env] = None,
 ) -> TradingERLWorkflow:
     """Convenience function to create a trading ERL workflow
 
@@ -587,6 +593,7 @@ def create_trading_workflow(
         evaluator: Evaluator for agent assessment
         config: Workflow configuration (uses defaults if None)
         seed: Random seed
+        eval_env: Optional separate env for validation-style evaluation
 
     Returns:
         Initialized TradingERLWorkflow
@@ -600,4 +607,5 @@ def create_trading_workflow(
         evaluator=evaluator,
         config=config,
         seed=seed,
+        eval_env=eval_env,
     )
