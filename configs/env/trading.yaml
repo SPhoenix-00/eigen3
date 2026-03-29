@@ -9,9 +9,11 @@ investable_start_col: 9
 num_features_obs: 5
 num_features_full: 9
 
-# Episode structure (364-step fiscal-year window; adjust if needed)
+# Episode: 364 inclusive calendar days (row count follows dates in data; see TradingEnv)
 trading_period_days: 364
 settlement_period_days: 0
+# Optional: override calendar span only (defaults to trading_period_days)
+# episode_calendar_days: 364
 # 30 calendar days (resolved via dates_ordinal array, not row count)
 min_holding_period: 30
 liquidation_window_days: 10

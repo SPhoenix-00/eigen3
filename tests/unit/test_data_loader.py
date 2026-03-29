@@ -462,14 +462,14 @@ class TestIntegrationWithEnvironment:
         state = env.reset(key)
 
         # Check observation shape
-        assert state.obs.shape == (504, 669, 5)
+        assert state.obs.shape == (151, 669, 5)
 
         # Step environment
         action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         new_state = env.step(state, action)
 
         # Should work without errors
-        assert new_state.obs.shape == (504, 669, 5)
+        assert new_state.obs.shape == (151, 669, 5)
 
 
 @pytest.mark.slow

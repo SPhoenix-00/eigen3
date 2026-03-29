@@ -587,7 +587,7 @@ class TestMonoRules:
         """
         import numpy as np
 
-        num_rows = 200
+        num_rows = 600
         # Build a weekday-only calendar: Mon-Fri, skip Sat/Sun.
         start_ordinal = 738000  # arbitrary anchor
         ordinals = []
@@ -616,6 +616,7 @@ class TestMonoRules:
             min_sale_target=1.0,
             max_sale_target=50.0,
             dates_ordinal=dates_ordinal,
+            episode_calendar_days=200,
         )
 
         key = random.PRNGKey(0)
@@ -627,20 +628,26 @@ class TestMonoRules:
         state = env.step(state, buy)
         assert state.env_state.num_active_positions >= 1
 
-        # After 8 steps (< 12 calendar days), sell should still be blocked.
-        for _ in range(8):
-            state = env.step(state, hold)
-        assert state.env_state.num_trades == 0, \
-            "Sold too early — 8 trading days < 12 calendar days"
+        entry = int(state.env_state.positions[0, 1])
 
-        # Steps 9-15: calendar gap crosses 12 days; should sell.
-        for _ in range(7):
+        # Until 12+ calendar days since entry, no target exit (weekend-spaced rows ≠ row count).
+        steps_guard = 0
+        while not state.done and steps_guard < 200:
+            steps_guard += 1
+            cs = int(state.env_state.current_step)
+            gap = int(env.dates_ordinal[cs]) - int(env.dates_ordinal[entry])
+            if gap >= int(env.min_holding_period):
+                break
+            assert state.env_state.num_trades == 0, (
+                "Sold before min holding period (calendar days from entry)"
+            )
             state = env.step(state, hold)
+
+        for _ in range(50):
             if state.env_state.num_trades > 0:
                 break
-        assert state.env_state.num_trades > 0, \
-            "Should have sold — enough calendar days have passed"
-
+            state = env.step(state, hold)
+        assert state.env_state.num_trades > 0, "Should have sold after min hold and target"
 
 @pytest.mark.slow
 class TestFullEpisode:

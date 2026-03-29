@@ -64,7 +64,7 @@ def test_create_synthetic_f1():
 
 def test_env_mono_shapes_match_config():
     obs, full, stats, _ = create_synthetic_data(
-        num_days=500, num_columns=18, num_features_obs=1, seed=2
+        num_days=700, num_columns=18, num_features_obs=1, seed=2
     )
     env = TradingEnv(
         obs,

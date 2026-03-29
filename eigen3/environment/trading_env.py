@@ -8,6 +8,7 @@ Implements the EvoRL Env interface with:
 """
 
 from typing import Tuple
+import numpy as np
 import jax
 import jax.numpy as jnp
 import chex
@@ -68,6 +69,55 @@ class TradingEnv(Env):
     Reward: Gains/losses from closed positions minus penalties
     """
 
+    @staticmethod
+    def _build_calendar_episode_schedule(
+        num_days: int,
+        dates_ordinal: np.ndarray,
+        episode_calendar_days: int,
+        settlement_period_days: int,
+        context_window_days: int,
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, int]:
+        """Per start row i: first exclusive row index after the calendar window.
+
+        Inclusive calendar-day count from row i through last row j of the window
+        equals ``episode_calendar_days`` (i.e. ``ord[j] - ord[i] == episode_calendar_days - 1``).
+        """
+        d = np.asarray(dates_ordinal, dtype=np.int64)
+        if d.shape[0] != num_days:
+            raise ValueError("dates_ordinal length must match num_days")
+        span_target = int(episode_calendar_days) - 1
+        if span_target < 0:
+            raise ValueError("episode_calendar_days must be >= 1")
+
+        cal_end_excl = np.full(num_days, -1, dtype=np.int32)
+        for i in range(num_days):
+            if i < int(context_window_days):
+                continue
+            target_ord = d[i] + span_target
+            j = int(np.searchsorted(d, target_ord, side="left"))
+            if j >= num_days:
+                continue
+            cal_excl = j + 1
+            if cal_excl + int(settlement_period_days) > num_days:
+                continue
+            cal_end_excl[i] = cal_excl
+
+        valid = np.nonzero(cal_end_excl >= 0)[0].astype(np.int32)
+        if valid.size == 0:
+            raise ValueError(
+                "No valid episode starts: need enough rows and calendar span so that "
+                f"{episode_calendar_days} inclusive calendar days fit after "
+                f"context_window_days={context_window_days} (and settlement rows)."
+            )
+
+        spans = cal_end_excl[valid].astype(np.int64) + int(settlement_period_days) - valid.astype(np.int64)
+        max_episode_rows = int(np.max(spans))
+        return (
+            jnp.asarray(cal_end_excl, dtype=jnp.int32),
+            jnp.asarray(valid, dtype=jnp.int32),
+            max_episode_rows,
+        )
+
     def __init__(
         self,
         data_array: chex.Array,  # [num_days, num_columns, F] observations
@@ -76,6 +126,7 @@ class TradingEnv(Env):
         context_window_days: int = 151,
         trading_period_days: int = 364,
         settlement_period_days: int = 0,
+        episode_calendar_days: int | None = None,
         min_holding_period: int = 30,
         max_positions: int = 10,
         inaction_penalty: float = 0.0,
@@ -99,10 +150,14 @@ class TradingEnv(Env):
             data_array_full: Price data for rewards [num_days, num_columns, 9]; price at index 1
             norm_stats: Normalization statistics {'mean', 'std'}
             context_window_days: Lookback window (default 151)
-            trading_period_days: Days in the episode when new positions may be opened
-                (episode length = trading_period_days + settlement_period_days).
-            settlement_period_days: Extra days after the trading window (no new opens);
-                use 0 for a single continuous fiscal-year-style window.
+            trading_period_days: Target **calendar-day** span of the primary episode window
+                (inclusive count from the date at the start row through the date at the
+                last row of that window). Defaults to 364. Row count per episode follows
+                from ``dates_ordinal`` (weekends/holidays may yield fewer than 364 rows).
+            settlement_period_days: Extra **rows** after the calendar window (no new opens);
+                use 0 for a single continuous window.
+            episode_calendar_days: If set, overrides ``trading_period_days`` for the calendar
+                span only (keeps ``trading_period_days`` attribute for logging/config parity).
             min_holding_period: Minimum **calendar days** since the last buy on a stock
                 before any sell (target hit, discretionary, or liquidation). Calendar
                 gaps between rows are handled by ``dates_ordinal``.
@@ -134,6 +189,11 @@ class TradingEnv(Env):
         self.context_window_days = context_window_days
         self.trading_period_days = trading_period_days
         self.settlement_period_days = settlement_period_days
+        self.episode_calendar_days = (
+            int(episode_calendar_days)
+            if episode_calendar_days is not None
+            else int(trading_period_days)
+        )
         self.min_holding_period = min_holding_period
         self.max_positions = max_positions
         self.inaction_penalty = inaction_penalty
@@ -149,12 +209,20 @@ class TradingEnv(Env):
         self.observation_noise_std = observation_noise_std
         self.is_training = is_training
 
-        # Compute valid episode ranges
-        self.min_start_idx = context_window_days
-        self.max_start_idx = num_days - trading_period_days - settlement_period_days
-
-        # Total episode length
-        self.episode_length = trading_period_days + settlement_period_days
+        # Calendar-based episode: inclusive span episode_calendar_days on dates_ordinal.
+        (
+            self._calendar_end_exclusive,
+            self._valid_start_indices,
+            self.episode_length,
+        ) = self._build_calendar_episode_schedule(
+            num_days=num_days,
+            dates_ordinal=np.asarray(self.dates_ordinal, dtype=np.int64),
+            episode_calendar_days=self.episode_calendar_days,
+            settlement_period_days=self.settlement_period_days,
+            context_window_days=self.context_window_days,
+        )
+        self.min_start_idx = int(self._valid_start_indices.min()) if self._valid_start_indices.size > 0 else context_window_days
+        self.max_start_idx = int(self._valid_start_indices.max()) if self._valid_start_indices.size > 0 else num_days - 1
 
     @property
     def obs_space(self):
@@ -186,16 +254,16 @@ class TradingEnv(Env):
         Returns:
             Initial EnvState
         """
-        # Sample random start index
-        start_idx = jax.random.randint(
-            key,
-            shape=(),
-            minval=self.min_start_idx,
-            maxval=self.max_start_idx + 1
-        )
+        # Random valid start (enough history + full calendar episode fits in data)
+        pick_key, rng_key = jax.random.split(key)
+        n_starts = self._valid_start_indices.shape[0]
+        pick = jax.random.randint(pick_key, shape=(), minval=0, maxval=n_starts)
+        start_idx = self._valid_start_indices[pick]
 
-        trading_end_step = start_idx + self.trading_period_days
-        end_step = trading_end_step + self.settlement_period_days
+        cal_excl = self._calendar_end_exclusive[start_idx]
+        # Last calendar row index is cal_excl - 1; no new opens on that row (liquidation only).
+        trading_end_step = cal_excl - 1
+        end_step = cal_excl + self.settlement_period_days
 
         # Initialize empty positions
         # Position format: [stock_idx, entry_step, entry_price, target_price, coefficient, is_active]
@@ -216,7 +284,7 @@ class TradingEnv(Env):
             total_gain_pct=jnp.array(0.0, dtype=jnp.float32),
             days_with_positions=jnp.array(0, dtype=jnp.int32),
             days_without_positions=jnp.array(0, dtype=jnp.int32),
-            rng_key=key,
+            rng_key=rng_key,
         )
 
         # Get initial observation (with optional noise when is_training)

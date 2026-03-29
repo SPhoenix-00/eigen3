@@ -109,6 +109,7 @@ def main(cfg: DictConfig) -> None:
         context_window_days=_env_cfg("context_window_days", 151),
         trading_period_days=_env_cfg("trading_period_days", 364),
         settlement_period_days=_env_cfg("settlement_period_days", 0),
+        episode_calendar_days=_env_cfg("episode_calendar_days", None),
         min_holding_period=_env_cfg("min_holding_period", 30),
         max_positions=_env_cfg("max_positions", 10),
         inaction_penalty=_env_cfg("inaction_penalty", 0.0),
