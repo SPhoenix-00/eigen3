@@ -1,4 +1,4 @@
-"""Unit tests for TradingERLWorkflow"""
+"""Unit tests for TradingERLWorkflow (GPU-vectorized)"""
 
 import pytest
 import jax
@@ -6,6 +6,13 @@ import jax.numpy as jnp
 import jax.random as random
 from unittest.mock import MagicMock
 from eigen3.workflows import TradingERLWorkflow, TradingWorkflowConfig, create_trading_workflow
+from eigen3.workflows.trading_workflow import (
+    stack_params,
+    unstack_params,
+    create_replay_buffer,
+    buffer_insert_batch,
+    buffer_sample,
+)
 from eigen3.environment import TradingEnv
 from eigen3.agents import TradingAgent
 from eigen3.models import Actor, DoubleCritic
@@ -50,7 +57,7 @@ def create_test_workflow(pop_size=4):
         critic_network=DoubleCritic(num_columns=nc),
         exploration_noise=0.1,
     )
-    evaluator = MagicMock()  # TradingERLWorkflow does not call the EvoRL Evaluator API yet
+    evaluator = MagicMock()
 
     config = TradingWorkflowConfig(
         population_size=pop_size,
@@ -63,6 +70,7 @@ def create_test_workflow(pop_size=4):
         batch_size=16,
         replay_buffer_size=1000,
         eval_episodes=2,
+        steps_per_agent=10,
     )
 
     workflow = TradingERLWorkflow(
@@ -86,7 +94,7 @@ class TestWorkflowInitialization:
         assert workflow.config.population_size == 4
         assert workflow.generation == 0
         assert workflow.total_env_steps == 0
-        assert workflow.population is None
+        assert workflow._stacked_params is None
 
     def test_create_workflow_convenience(self):
         """Test convenience creation function"""
@@ -110,215 +118,165 @@ class TestPopulationManagement:
     """Test population initialization and management"""
 
     def test_initialize_population(self):
-        """Test population initialization"""
+        """Test population initialization produces stacked params"""
         workflow = create_test_workflow(pop_size=3)
 
         key = random.PRNGKey(0)
-        population = workflow._initialize_population(key)
+        workflow._initialize_population(key)
 
-        # Check population size
-        assert len(population) == 3
+        stacked = workflow._stacked_params
+        assert stacked is not None
 
-        # Check each agent has correct structure
-        for agent_params in population:
-            assert hasattr(agent_params, 'actor_params')
-            assert hasattr(agent_params, 'critic_params')
-            assert hasattr(agent_params, 'target_actor_params')
-            assert hasattr(agent_params, 'target_critic_params')
+        # Leading dim of each leaf should be pop_size
+        leaves = jax.tree.leaves(stacked)
+        for leaf in leaves:
+            assert leaf.shape[0] == 3
 
     def test_population_initialized_on_first_generation(self):
         """Test that population is initialized on first generation"""
         workflow = create_test_workflow(pop_size=2)
 
-        assert workflow.population is None
+        assert workflow._stacked_params is None
 
-        # Run one generation
         metrics = workflow.run_generation()
 
-        # Population should now be initialized
-        assert workflow.population is not None
-        assert len(workflow.population) == 2
+        assert workflow._stacked_params is not None
+        # Verify leading dim = pop_size on a sample leaf
+        some_leaf = jax.tree.leaves(workflow._stacked_params)[0]
+        assert some_leaf.shape[0] == 2
+
+
+class TestStackUnstack:
+    """Test stack_params / unstack_params utilities"""
+
+    def test_roundtrip(self):
+        """stack then unstack should recover original params"""
+        workflow = create_test_workflow(pop_size=3)
+        key = random.PRNGKey(0)
+        keys = random.split(key, 3)
+        population = [
+            workflow.agent.init(workflow.env.obs_space, workflow.env.action_space, k).params
+            for k in keys
+        ]
+
+        stacked = stack_params(population)
+        recovered = unstack_params(stacked, 3)
+
+        for i in range(3):
+            orig_leaves = jax.tree.leaves(population[i])
+            rec_leaves = jax.tree.leaves(recovered[i])
+            for o, r in zip(orig_leaves, rec_leaves):
+                assert jnp.array_equal(o, r)
+
+
+class TestReplayBuffer:
+    """Test JAX replay buffer operations"""
+
+    def test_create_buffer(self):
+        buf = create_replay_buffer(100, (5,), (3,))
+        assert buf.obs.shape == (100, 5)
+        assert buf.actions.shape == (100, 3)
+        assert int(buf.size) == 0
+
+    def test_insert_and_sample(self):
+        buf = create_replay_buffer(100, (5,), (3,))
+        key = random.PRNGKey(0)
+
+        obs = random.normal(key, (10, 5))
+        acts = random.normal(key, (10, 3))
+        rews = jnp.ones(10)
+        nobs = random.normal(key, (10, 5))
+        dones = jnp.zeros(10)
+
+        buf = buffer_insert_batch(buf, obs, acts, rews, nobs, dones)
+        assert int(buf.size) == 10
+        assert int(buf.insert_idx) == 10
+
+        batch = buffer_sample(buf, key, 4)
+        assert batch.obs.shape == (4, 5)
+        assert batch.actions.shape == (4, 3)
+
+    def test_ring_wrap(self):
+        buf = create_replay_buffer(10, (2,), (1,))
+        key = random.PRNGKey(0)
+
+        for i in range(3):
+            obs = jnp.ones((5, 2)) * i
+            buf = buffer_insert_batch(
+                buf, obs, jnp.zeros((5, 1)),
+                jnp.zeros(5), obs, jnp.zeros(5),
+            )
+
+        # 15 inserts into capacity-10 buffer → size capped at 10
+        assert int(buf.size) == 10
+        assert int(buf.insert_idx) == 5  # 15 % 10
 
 
 class TestGeneticOperators:
     """Test genetic algorithm operators"""
 
     def test_tournament_selection(self):
-        """Test tournament selection"""
+        """Test tournament selection returns valid index"""
         workflow = create_test_workflow(pop_size=5)
+        fitness = jnp.array([1.0, 5.0, 3.0, 2.0, 4.0])
 
-        # Initialize population
-        key = random.PRNGKey(0)
-        population = workflow._initialize_population(key)
-
-        # Create fitness scores
-        fitness_scores = jnp.array([1.0, 5.0, 3.0, 2.0, 4.0])
-
-        # Select agent
         key = random.PRNGKey(1)
-        selected = workflow._tournament_selection(population, fitness_scores, key)
-
-        # Should return valid agent params
-        assert hasattr(selected, 'actor_params')
-        assert hasattr(selected, 'critic_params')
+        idx = workflow._tournament_select(fitness, key)
+        assert 0 <= idx < 5
 
     def test_crossover(self):
         """Test crossover operator"""
         workflow = create_test_workflow()
 
-        # Initialize two parents
         key = random.PRNGKey(0)
-        key1, key2, cross_key = random.split(key, 3)
+        k1, k2, cross_key = random.split(key, 3)
 
-        parent1 = workflow.agent.init(
-            workflow.env.obs_space, workflow.env.action_space, key1
-        ).params
-        parent2 = workflow.agent.init(
-            workflow.env.obs_space, workflow.env.action_space, key2
-        ).params
+        p1 = workflow.agent.init(workflow.env.obs_space, workflow.env.action_space, k1).params
+        p2 = workflow.agent.init(workflow.env.obs_space, workflow.env.action_space, k2).params
 
-        # Perform crossover
-        child = workflow._crossover(parent1, parent2, cross_key)
+        child = workflow._crossover_single(p1, p2, cross_key)
 
-        # Child should have same structure
         assert hasattr(child, 'actor_params')
         assert hasattr(child, 'critic_params')
-
-        # Check that child parameters are different from both parents
-        # (at least some parameters should differ due to randomness)
-        def params_differ(p1, p2):
-            return jax.tree_util.tree_map(
-                lambda x, y: jnp.any(x != y),
-                p1, p2
-            )
-
-        # Child should combine elements from both parents
-        # (Can't easily test exact mixing, but structure should be valid)
         assert child.actor_params is not None
 
     def test_mutation(self):
         """Test mutation operator"""
         workflow = create_test_workflow()
 
-        # Initialize agent
         key = random.PRNGKey(0)
-        params = workflow.agent.init(
-            workflow.env.obs_space, workflow.env.action_space, key
-        ).params
-
-        # Store original param for comparison
+        params = workflow.agent.init(workflow.env.obs_space, workflow.env.action_space, key).params
         original_actor_params = params.actor_params
 
-        # Perform mutation
         key = random.PRNGKey(1)
-        mutated = workflow._mutate(params, key)
+        mutated = workflow._mutate_single(params, key)
 
-        # Mutated params should have same structure
         assert hasattr(mutated, 'actor_params')
         assert hasattr(mutated, 'critic_params')
 
-        # At least some parameters should change (with high probability)
-        # Note: Due to mutation_rate < 1.0, not all params will change
         def any_changed(original, mutated):
-            diffs = jax.tree_util.tree_map(
-                lambda o, m: jnp.any(o != m),
-                original, mutated
-            )
-            # Check if any leaf differs
-            leaves = jax.tree_util.tree_leaves(diffs)
-            return any(leaves)
+            diffs = jax.tree.map(lambda o, m: jnp.any(o != m), original, mutated)
+            return any(jax.tree.leaves(diffs))
 
-        # Should be different (stochastic test)
         assert any_changed(original_actor_params, mutated.actor_params)
 
     def test_mutation_rate(self):
         """Test mutation respects mutation rate"""
-        # Use high mutation rate for testing
         workflow = create_test_workflow()
-        workflow.config.mutation_rate = 1.0  # Mutate all parameters
+        workflow.config.mutation_rate = 1.0
 
         key = random.PRNGKey(0)
-        params = workflow.agent.init(
-            workflow.env.obs_space, workflow.env.action_space, key
-        ).params
+        params = workflow.agent.init(workflow.env.obs_space, workflow.env.action_space, key).params
 
-        # Mutate
         key = random.PRNGKey(1)
-        mutated = workflow._mutate(params, key)
+        mutated = workflow._mutate_single(params, key)
 
-        # With mutation_rate=1.0, all parameters should be different
-        def all_changed(original, mutated):
-            diffs = jax.tree_util.tree_map(
-                lambda o, m: jnp.any(o != m),
-                original, mutated
-            )
-            return diffs
-
-        diffs = all_changed(params.actor_params, mutated.actor_params)
-        # Most leaves should differ (allowing for some floating point edge cases)
-        assert any(jax.tree_util.tree_leaves(diffs))
-
-
-class TestExperienceCollection:
-    """Test experience collection"""
-
-    def test_collect_experience(self):
-        """Test collecting experience from environment"""
-        workflow = create_test_workflow()
-
-        # Initialize agent
-        key = random.PRNGKey(0)
-        agent_params = workflow.agent.init(
-            workflow.env.obs_space, workflow.env.action_space, key
-        ).params
-
-        # Collect experience
-        key = random.PRNGKey(1)
-        transitions, cumulative_reward = workflow._collect_experience(
-            agent_params=agent_params,
-            num_steps=10,
-            key=key,
+        diffs = jax.tree.map(
+            lambda o, m: jnp.any(o != m),
+            params.actor_params,
+            mutated.actor_params,
         )
-
-        # Should collect 10 transitions
-        assert len(transitions) == 10
-
-        # Check transition structure
-        for trans in transitions:
-            assert 'obs' in trans
-            assert 'action' in trans
-            assert 'reward' in trans
-            assert 'next_obs' in trans
-            assert 'done' in trans
-
-            assert trans['obs'].shape == workflow.env.obs_space.shape
-            assert trans['action'].shape == (108, 3)
-
-        # Cumulative reward should be a number
-        assert isinstance(cumulative_reward, float)
-
-
-class TestAgentEvaluation:
-    """Test agent evaluation"""
-
-    def test_evaluate_agent(self):
-        """Test evaluating agent fitness"""
-        workflow = create_test_workflow()
-
-        # Initialize agent
-        key = random.PRNGKey(0)
-        agent_params = workflow.agent.init(
-            workflow.env.obs_space, workflow.env.action_space, key
-        ).params
-
-        # Evaluate
-        key = random.PRNGKey(1)
-        fitness = workflow._evaluate_agent(agent_params, key)
-
-        # Fitness should be a number
-        assert isinstance(fitness, float)
-        # Should be finite
-        assert jnp.isfinite(fitness)
+        assert any(jax.tree.leaves(diffs))
 
 
 class TestGenerationExecution:
@@ -330,7 +288,6 @@ class TestGenerationExecution:
 
         metrics = workflow.run_generation()
 
-        # Check metrics
         assert 'generation' in metrics
         assert 'mean_fitness' in metrics
         assert 'max_fitness' in metrics
@@ -340,8 +297,7 @@ class TestGenerationExecution:
 
         assert metrics['generation'] == 1
         assert workflow.generation == 1
-        assert workflow.population is not None
-        assert len(workflow.population) == 2
+        assert workflow._stacked_params is not None
 
     def test_run_multiple_generations(self):
         """Test running multiple generations"""
@@ -349,42 +305,32 @@ class TestGenerationExecution:
 
         all_metrics = workflow.train(num_generations=3)
 
-        # Should have metrics for 3 generations
         assert len(all_metrics) == 3
-
-        # Generation numbers should increase
         assert all_metrics[0]['generation'] == 1
         assert all_metrics[1]['generation'] == 2
         assert all_metrics[2]['generation'] == 3
-
-        # Environment steps should increase
         assert all_metrics[2]['total_env_steps'] > all_metrics[0]['total_env_steps']
 
     def test_elite_preservation(self):
-        """Test that elite agents are preserved"""
+        """Test that population size is preserved after breeding"""
         workflow = create_test_workflow(pop_size=4)
         workflow.config.elite_size = 2
 
-        # Run generation
         workflow.run_generation()
 
-        # Population should still be size 4
-        assert len(workflow.population) == 4
+        some_leaf = jax.tree.leaves(workflow._stacked_params)[0]
+        assert some_leaf.shape[0] == 4
 
     def test_replay_buffer_management(self):
-        """Test replay buffer growth and trimming"""
+        """Test replay buffer growth"""
         workflow = create_test_workflow(pop_size=2)
         workflow.config.replay_buffer_size = 100
 
-        # Run generation
         workflow.run_generation()
 
-        # Replay buffer should have data
-        assert workflow.replay_buffer is not None
-        assert len(workflow.replay_buffer) > 0
-
-        # Should not exceed max size
-        assert len(workflow.replay_buffer) <= workflow.config.replay_buffer_size
+        assert workflow._replay_buffer is not None
+        assert int(workflow._replay_buffer.size) > 0
+        assert int(workflow._replay_buffer.size) <= workflow.config.replay_buffer_size
 
 
 class TestBestAgentRetrieval:
@@ -394,14 +340,11 @@ class TestBestAgentRetrieval:
         """Test getting best agent from population"""
         workflow = create_test_workflow(pop_size=3)
 
-        # Should fail before any generation
         with pytest.raises(ValueError, match="Population not initialized"):
             workflow.get_best_agent()
 
-        # Run generation
         workflow.run_generation()
 
-        # Now should work
         best_agent = workflow.get_best_agent()
 
         assert hasattr(best_agent, 'actor_params')
@@ -416,14 +359,11 @@ class TestWorkflowDeterminism:
         workflow1 = create_test_workflow(pop_size=2)
         workflow2 = create_test_workflow(pop_size=2)
 
-        # Both should use seed=42
         assert workflow1.seed == workflow2.seed
 
         metrics1 = workflow1.run_generation()
         metrics2 = workflow2.run_generation()
 
-        # Should produce same fitness results
-        # (Note: Due to JAX PRNG determinism, this should be exact)
         assert abs(metrics1['mean_fitness'] - metrics2['mean_fitness']) < 1e-5
 
     def test_different_seeds_produce_different_results(self):
@@ -436,7 +376,14 @@ class TestWorkflowDeterminism:
             critic_network=DoubleCritic(num_columns=nc),
         )
         evaluator = MagicMock()
-        config = TradingWorkflowConfig(population_size=2)
+        config = TradingWorkflowConfig(
+            population_size=2,
+            steps_per_agent=10,
+            gradient_steps_per_gen=5,
+            batch_size=16,
+            replay_buffer_size=1000,
+            eval_episodes=2,
+        )
 
         workflow1 = TradingERLWorkflow(env, agent, evaluator, config, seed=0)
         workflow2 = TradingERLWorkflow(env, agent, evaluator, config, seed=999)
@@ -444,8 +391,6 @@ class TestWorkflowDeterminism:
         metrics1 = workflow1.run_generation()
         metrics2 = workflow2.run_generation()
 
-        # Should produce different results (with very high probability)
-        # Note: Could technically be same, but extremely unlikely
         assert abs(metrics1['mean_fitness'] - metrics2['mean_fitness']) > 1e-10 or \
                abs(metrics1['max_fitness'] - metrics2['max_fitness']) > 1e-10
 
@@ -458,17 +403,13 @@ class TestFullWorkflow:
         """Test running complete training workflow"""
         workflow = create_test_workflow(pop_size=3)
 
-        # Train for a few generations
         all_metrics = workflow.train(num_generations=2)
 
-        # Should complete successfully
         assert len(all_metrics) == 2
 
-        # Get best agent
         best_agent = workflow.get_best_agent()
         assert best_agent is not None
 
-        # Verify best agent can be used
         key = random.PRNGKey(0)
         dummy_obs = jnp.zeros((1, *workflow.env.obs_space.shape))
         actions, _ = workflow.agent.evaluate_actions(

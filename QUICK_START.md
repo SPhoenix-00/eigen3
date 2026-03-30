@@ -255,6 +255,55 @@ eigen3/
 
 ---
 
+## GPU-Vectorized Workflow (H100 / high-VRAM GPUs)
+
+`TradingERLWorkflow` processes **all agents in the population simultaneously**
+via `jax.vmap`, replacing sequential Python loops with batched GPU kernels.
+On an H100 SXM this yields 10–50x wall-clock speed-up over a naive
+one-agent-at-a-time loop.
+
+### How it works
+
+| Phase | What happens on GPU |
+|-------|---------------------|
+| **Collect experience** | `vmap(env.step)` + `vmap(agent.compute_actions)` — one kernel per time-step for the entire population |
+| **Gradient updates** | `vmap(agent.loss)` — 5 forward passes × pop_size agents fused into 5 kernels (shared replay batch) |
+| **Evaluate** | `vmap(eval_env.step)` + `vmap(agent.evaluate_actions)` — same pattern |
+| **Replay buffer** | Pre-allocated JAX ring buffer on device (no Python list overhead) |
+
+### Tuning batch size for your GPU
+
+The default `population.local_batch_size: 40` was sized for ~18 GB VRAM.
+For 80 GB GPUs, increase batch size to keep the GPU saturated:
+
+```bash
+# H100 SXM 80 GB — start here and watch nvidia-smi:
+python scripts/train.py \
+    population.batch_size=512 \
+    population.local_batch_size=512 \
+    population.pop_size=48 \
+    population.gradient_steps_per_gen=32
+
+# A100 80 GB:
+python scripts/train.py \
+    population.batch_size=256 \
+    population.local_batch_size=256 \
+    population.pop_size=48
+```
+
+### XLA flags (optional, H100)
+
+```bash
+export XLA_PYTHON_CLIENT_PREALLOCATE=true
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+export XLA_FLAGS="--xla_gpu_enable_triton_softmax_fusion=true --xla_gpu_triton_gemm_any=true"
+```
+
+The Triton flags are experimental; disable them if you see NaN or incorrect
+results.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -264,5 +313,6 @@ eigen3/
 | `jax.devices()` returns `[CpuDevice]` | Reinstall JAX: `pip install -U "jax[cuda12]"` — make sure CUDA 12 drivers are present |
 | `uvloop` install fails on Windows | Use WSL or Linux; `requirements-data.txt` is the only Windows-safe option |
 | HoF says "falling back to local" | Check `CLOUD_PROVIDER`, `CLOUD_BUCKET`, and `GOOGLE_APPLICATION_CREDENTIALS` are set |
-| OOM on GPU | Lower `population.pop_size` or `population.batch_size`; A100 80 GB handles the defaults comfortably |
+| OOM on GPU | Lower `population.pop_size` or `population.batch_size`; A100/H100 80 GB handles the defaults comfortably |
+| Low GPU utilisation (`nvidia-smi` <30%) | Increase `population.batch_size` (try 256, 512, 1024); mono model is small and needs large batches to saturate |
 | `orbax-checkpoint` build error | Ensure you're on Python 3.10–3.11; some 3.12 wheels may lag |

@@ -23,5 +23,8 @@ typing-extensions>=4.8.0
 # Optional env backend for EvoRL (import is guarded in evorl.envs).
 gymnax>=0.0.6
 
+# GCS uploads/downloads for Hall of Fame / checkpoints (eigen3.erl.cloud_sync).
+google-cloud-storage>=2.10.0
+
 # Eigen3 package (import path eigen3.*)
 -e .

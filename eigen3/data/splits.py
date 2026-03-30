@@ -133,6 +133,7 @@ def compute_train_val_holdout_split(
         episode_calendar_days=int(episode_calendar_days),
         settlement_period_days=int(settlement_period_days),
         context_window_days=int(context_window_days),
+        allow_empty=True,
     )
     if np.asarray(train_valid).size == 0:
         raise ValueError(
@@ -148,11 +149,19 @@ def compute_train_val_holdout_split(
         episode_calendar_days=int(episode_calendar_days),
         settlement_period_days=int(settlement_period_days),
         context_window_days=int(context_window_days),
+        allow_empty=True,
     )
     if np.asarray(val_valid).size == 0:
+        d_val = d[val_start:val_end]
+        cal_span = int(d_val[-1] - d_val[0]) if vlen > 0 else 0
         raise ValueError(
-            f"Validation band [{val_start}, {val_end}) ({vlen} rows) has no valid episode "
-            "starts; increase validation_reserve_multiplier or data length."
+            f"Validation band [{val_start}, {val_end}) ({vlen} rows, ~{cal_span} calendar days "
+            f"from first to last row) has no valid episode starts for "
+            f"episode_calendar_days={episode_calendar_days} after "
+            f"context_window_days={context_window_days}. "
+            "Try: env.validation_reserve_multiplier=2.5 (or higher), "
+            "or reduce env.trading_period_days / env.context_window_days, "
+            "or fix duplicate/flat dates in column A if rows are not one calendar day each."
         )
 
     return TrainValHoldoutSplit(

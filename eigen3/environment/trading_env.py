@@ -87,6 +87,8 @@ class TradingEnv(Env):
         episode_calendar_days: int,
         settlement_period_days: int,
         context_window_days: int,
+        *,
+        allow_empty: bool = False,
     ) -> Tuple[jnp.ndarray, jnp.ndarray, int]:
         """Per start row i: first exclusive row index after the calendar window.
 
@@ -115,6 +117,12 @@ class TradingEnv(Env):
 
         valid = np.nonzero(cal_end_excl >= 0)[0].astype(np.int32)
         if valid.size == 0:
+            if allow_empty:
+                return (
+                    jnp.asarray(cal_end_excl, dtype=jnp.int32),
+                    jnp.asarray(valid, dtype=jnp.int32),
+                    0,
+                )
             raise ValueError(
                 "No valid episode starts: need enough rows and calendar span so that "
                 f"{episode_calendar_days} inclusive calendar days fit after "
