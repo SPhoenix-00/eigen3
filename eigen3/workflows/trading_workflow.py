@@ -346,10 +346,12 @@ class TradingERLWorkflow:
         config: TradingWorkflowConfig,
         seed: int = 0,
         val_env: Optional[Env] = None,
+        holdout_env: Optional[Env] = None,
         hall_of_fame: Optional[HallOfFame] = None,
     ):
         self.env = env
         self.val_env = val_env if val_env is not None else env
+        self.holdout_env = holdout_env
         self.agent = agent
         self.evaluator = evaluator
         self.config = config
@@ -419,6 +421,14 @@ class TradingERLWorkflow:
         self._vmap_env_reset = jax.jit(jax.vmap(env.reset))
         self._vmap_val_step = jax.jit(jax.vmap(lambda s, a: val_env.step(s, a)))
         self._vmap_val_reset = jax.jit(jax.vmap(val_env.reset))
+
+        if self.holdout_env is not None:
+            ho = self.holdout_env
+            self._vmap_holdout_step = jax.jit(jax.vmap(lambda s, a: ho.step(s, a)))
+            self._vmap_holdout_reset = jax.jit(jax.vmap(ho.reset))
+        else:
+            self._vmap_holdout_step = None
+            self._vmap_holdout_reset = None
 
         pop_size_int = int(self._pop_size)
         collect_erp = float(getattr(env, "episode_reward_multiplier", 1.0))
@@ -885,6 +895,138 @@ class TradingERLWorkflow:
         }
         return fitness, mean_excess, val_roi_pct, mean_pnl, reward_mean, reward_min, per_episode
 
+    def _gauntlet_single_episode_bn_excess(
+        self,
+        stacked_params: TradingNetworkParams,
+        key: chex.PRNGKey,
+        target_env: Env,
+        vmap_reset: Callable[..., Any],
+        vmap_step: Callable[..., Any],
+        shared_reset_key: chex.PRNGKey,
+    ) -> chex.Array:
+        """One episode per agent on *target_env*; identical reset key → same random episode for all."""
+        leaves = jax.tree.leaves(stacked_params)
+        if not leaves:
+            raise ValueError("empty stacked_params")
+        n_agents = int(leaves[0].shape[0])
+        reset_keys = jnp.tile(shared_reset_key[None, :], (n_agents, 1))
+
+        _ep_len = getattr(target_env, "episode_length", None)
+        _slack = 128
+        if _ep_len is not None:
+            try:
+                max_steps = int(_ep_len) + _slack
+            except (TypeError, ValueError):
+                max_steps = 10_000 + _slack
+        else:
+            max_steps = 10_000 + _slack
+
+        vmap_excess = None
+        if hasattr(target_env, "episode_buyhold_excess_usd"):
+            vmap_excess = jax.vmap(target_env.episode_buyhold_excess_usd)
+
+        val_erp = getattr(target_env, "episode_reward_multiplier", 1.0)
+        loss_penalty_multiplier = getattr(target_env, "loss_penalty_multiplier", 1.25)
+        val_erp_j = jnp.asarray(val_erp, dtype=jnp.float32)
+        bnh_m_j = jnp.asarray(1.0, dtype=jnp.float32)
+        bnh_multiplier = 1.0
+        action_bonus = 0.0
+        bnh_clamp_negative_terminal = False
+
+        env_states = vmap_reset(reset_keys)
+        env_states = env_states.replace(
+            env_state=env_states.env_state.replace(
+                loss_penalty_multiplier=jnp.full_like(
+                    env_states.env_state.loss_penalty_multiplier, loss_penalty_multiplier,
+                ),
+                action_bonus=jnp.full_like(
+                    env_states.env_state.action_bonus, action_bonus,
+                ),
+            )
+        )
+
+        done_mask = jnp.zeros(n_agents, dtype=jnp.bool_)
+        ep_excess = jnp.zeros(n_agents)
+
+        for _ in range(max_steps):
+            key, step_key = random.split(key)
+            action_keys = random.split(step_key, n_agents)
+            all_actions = self._vmap_eval_actions(
+                stacked_params, env_states.obs, action_keys,
+            )
+            next_states = vmap_step(env_states, all_actions)
+
+            excess = next_states.env_state.episode_benchmark_excess
+            if bnh_multiplier != 1.0:
+                bnh_adj = jnp.where(
+                    next_states.done,
+                    excess * val_erp * (bnh_multiplier - 1.0),
+                    0.0,
+                )
+                next_states = next_states.replace(
+                    reward=next_states.reward + bnh_adj,
+                )
+            if bnh_clamp_negative_terminal:
+                excess = next_states.env_state.episode_benchmark_excess
+                full_bnh = excess * val_erp_j * bnh_m_j
+                clip_bnh = jnp.maximum(excess, 0.0) * val_erp_j * bnh_m_j
+                next_states = next_states.replace(
+                    reward=next_states.reward
+                    + jnp.where(next_states.done, clip_bnh - full_bnh, 0.0),
+                )
+
+            newly_done = next_states.done & ~done_mask
+            if vmap_excess is not None:
+                ex = vmap_excess(next_states)
+                ep_excess = jnp.where(newly_done, ex, ep_excess)
+            done_mask = done_mask | next_states.done
+            env_states = next_states
+
+        return ep_excess
+
+    def gauntlet_evaluate(
+        self,
+        stacked_params: TradingNetworkParams,
+        key: chex.PRNGKey,
+    ) -> Dict[str, Any]:
+        """HoF gauntlet: shared validation episode + holdout episode; raw BNH excess each.
+
+        Requires ``holdout_env`` and holdout vmapped fns. Returns host-ready dict
+        (NumPy) including ``val_reset_key_uint32`` for reproducibility.
+        """
+        if self.holdout_env is None or self._vmap_holdout_reset is None:
+            raise ValueError("gauntlet_evaluate requires holdout_env at workflow construction")
+
+        key, k_val_reset, k_hold_reset, k_steps = random.split(key, 4)
+        k_val_steps, k_hold_steps = random.split(k_steps)
+        val_excess = self._gauntlet_single_episode_bn_excess(
+            stacked_params,
+            k_val_steps,
+            self.val_env,
+            self._vmap_val_reset,
+            self._vmap_val_step,
+            shared_reset_key=k_val_reset,
+        )
+        hold_excess = self._gauntlet_single_episode_bn_excess(
+            stacked_params,
+            k_hold_steps,
+            self.holdout_env,
+            self._vmap_holdout_reset,
+            self._vmap_holdout_step,
+            shared_reset_key=k_hold_reset,
+        )
+        key_uint = np.asarray(jax.device_get(k_val_reset), dtype=np.uint32)
+        hold_key_uint = np.asarray(jax.device_get(k_hold_reset), dtype=np.uint32)
+        return {
+            "val_bn_excess": np.asarray(jax.device_get(val_excess), dtype=np.float64),
+            "hold_bn_excess": np.asarray(jax.device_get(hold_excess), dtype=np.float64),
+            "gauntlet_score": np.asarray(
+                jax.device_get(val_excess + hold_excess), dtype=np.float64
+            ),
+            "val_reset_key_uint32": key_uint.tolist(),
+            "hold_reset_key_uint32": hold_key_uint.tolist(),
+        }
+
     # ------------------------------------------------------------------
     # Phase 4 — Genetic operators
     # ------------------------------------------------------------------
@@ -1316,6 +1458,7 @@ def create_trading_workflow(
     config: Optional[TradingWorkflowConfig] = None,
     seed: int = 0,
     val_env: Optional[Env] = None,
+    holdout_env: Optional[Env] = None,
     hall_of_fame: Optional[HallOfFame] = None,
 ) -> TradingERLWorkflow:
     """Convenience function to create a trading ERL workflow."""
@@ -1329,5 +1472,6 @@ def create_trading_workflow(
         config=config,
         seed=seed,
         val_env=val_env,
+        holdout_env=holdout_env,
         hall_of_fame=hall_of_fame,
     )

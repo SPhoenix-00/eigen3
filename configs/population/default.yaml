@@ -158,6 +158,13 @@ roi_quality_threshold: 10.0          # Eigen2 ROI_QUALITY_THRESHOLD (min gain_pc
 # (defaults to <repo-root>/gcs-credentials.json when present, e.g. /workspace/eigen3/gcs-credentials.json)
 cloud_project_name: "eigen3"         # Prefix inside the bucket (e.g. gs://bucket/eigen3/hall_of_fame/)
 
+# ---------- HoF gauntlet & Global 15 (shared leaderboard) ----------
+# Every N generations: re-evaluate all HoF agents on one shared random validation episode +
+# holdout; purge HoF if validation BNH <= 0; promote double-passers to Global 15 by gauntlet score.
+gauntlet_interval: 20                 # 0 disables
+global_15_capacity: 15                # Top-N by gauntlet score under EIGEN3_ARTIFACT_ROOT/global_15/ + gs://.../{cloud_project}/global_15/
+gauntlet_bnh_clamp: false             # Reserved — gauntlet uses raw terminal BNH excess for pass/fail
+
 
 # ---------- Consistency Mode ----------
 consistency_loss_multiplier: 1.5     # Eigen2 CONSISTENCY_LOSS_MULTIPLIER — magnify losses 1.5x

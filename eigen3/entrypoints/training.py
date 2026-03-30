@@ -26,7 +26,11 @@ from eigen3.config import (
     DEFAULT_LOSS_PENALTY_MULTIPLIER,
 )
 from eigen3.data import load_trading_data
-from eigen3.data.splits import compute_train_val_holdout_split, slice_trading_timeline
+from eigen3.data.splits import (
+    TrainValHoldoutSplit,
+    compute_train_val_holdout_split,
+    slice_trading_timeline,
+)
 from eigen3.environment.trading_env import TradingEnv
 from eigen3.models import Actor, DoubleCritic
 from eigen3.utils.gpu_memory import log_gpu_memory_report, should_log_gpu_memory_this_generation
@@ -35,7 +39,9 @@ from eigen3.utils.training_checkpoint import (
     save_training_checkpoint,
     training_state_path,
 )
+from eigen3.erl.global_fifteen import GlobalFifteen
 from eigen3.workflows import TradingWorkflowConfig, create_trading_workflow
+from eigen3.workflows.trading_workflow import stack_params
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +255,150 @@ class CompatArtifactManager:
             "summary_csv": str(summary_csv_path),
             "trades_csv": str(trades_csv_path),
         }
+
+    def write_gauntlet_bundle(
+        self, generation: int, payload: dict[str, Any]
+    ) -> dict[str, str]:
+        """Write ``gauntlet_gen{NNNN}.json`` and matching CSV under ``eval_dir``."""
+        return _write_gauntlet_reports(
+            self.eval_dir,
+            generation=generation,
+            payload=payload,
+        )
+
+
+def _write_gauntlet_reports(
+    eval_dir: Path,
+    *,
+    generation: int,
+    payload: dict[str, Any],
+) -> dict[str, str]:
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    gen_tag = f"{int(generation):04d}"
+    json_path = eval_dir / f"gauntlet_gen{gen_tag}.json"
+    csv_path = eval_dir / f"gauntlet_gen{gen_tag}.csv"
+    with json_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    rows = payload.get("per_agent_rows", [])
+    if rows:
+        fields = list(rows[0].keys())
+        with csv_path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+    return {"json": str(json_path), "csv": str(csv_path)}
+
+
+def _maybe_run_hof_gauntlet(
+    *,
+    workflow: Any,
+    hof: Any,
+    global_fifteen: GlobalFifteen,
+    cfg: DictConfig,
+    run_name: str,
+    eval_dir: Path,
+    split: TrainValHoldoutSplit,
+) -> None:
+    """Every ``population.gauntlet_interval`` generations: HoF gauntlet + Global 15 updates."""
+    interval = int(OmegaConf.select(cfg, "population.gauntlet_interval", default=20))
+    if interval <= 0 or workflow.generation % interval != 0 or len(hof) == 0:
+        return
+    if workflow._stacked_params is None:
+        return
+
+    logger.info(
+        "HoF gauntlet (gen=%s): evaluating %d HoF agents (val + holdout)...",
+        workflow.generation,
+        len(hof),
+    )
+    template = jax.tree.map(lambda x: x[0], workflow._stacked_params)
+    entries_snapshot = list(hof.entries)
+    loaded = [hof.load_params(e.agent_id, template) for e in entries_snapshot]
+    stacked = stack_params(loaded)
+
+    seed = int(OmegaConf.select(cfg, "seed", default=0))
+    gauntlet_key = jax.random.fold_in(
+        jax.random.fold_in(jax.random.PRNGKey(seed), workflow.generation),
+        0x47314E54,  # "GANT" — gauntlet stream salt
+    )
+    out = workflow.gauntlet_evaluate(stacked, gauntlet_key)
+
+    val_bn = out["val_bn_excess"]
+    hold_bn = out["hold_bn_excess"]
+    gscore = out["gauntlet_score"]
+
+    purge_ids: list[int] = []
+    per_agent_rows: list[dict[str, Any]] = []
+    candidates: list[tuple[Any, float, float, float, Any]] = []
+
+    for i, entry in enumerate(entries_snapshot):
+        v = float(val_bn[i])
+        h = float(hold_bn[i])
+        g = float(gscore[i])
+        if v <= 0.0:
+            purge_ids.append(entry.agent_id)
+        row: dict[str, Any] = {
+            "hof_agent_id": entry.agent_id,
+            "hof_generation": entry.generation,
+            "val_bn_excess": v,
+            "hold_bn_excess": h,
+            "gauntlet_score": g,
+            "purged_val_bn_fail": v <= 0.0,
+            "promoted_global15": False,
+            "global15_action": "",
+        }
+        per_agent_rows.append(row)
+        if v > 0.0 and h > 0.0:
+            candidates.append((loaded[i], g, v, h, entry))
+
+    removed = hof.remove_entries_by_agent_ids(purge_ids)
+    if removed:
+        logger.info("HoF gauntlet: purged %d HoF agent(s) (validation BNH <= 0).", len(removed))
+
+    candidates.sort(key=lambda t: -t[1])
+    for params_i, g, v, h, ent in candidates:
+        action = global_fifteen.add_or_replace(
+            params_i,
+            gauntlet_score=g,
+            val_bn_excess=v,
+            hold_bn_excess=h,
+            promoted_at_generation=int(workflow.generation),
+            source_run_name=run_name,
+            source_hof_agent_id=int(ent.agent_id),
+        )
+        for row in per_agent_rows:
+            if row["hof_agent_id"] == ent.agent_id:
+                if action.startswith("admitted") or action.startswith("replaced"):
+                    row["promoted_global15"] = True
+                    row["global15_action"] = action
+                else:
+                    row["global15_action"] = action
+                break
+
+    hof.save()
+    global_fifteen.save()
+
+    split_info = {
+        "val_env_start": split.val_env_start,
+        "val_end": split.val_end,
+        "holdout_env_start": split.holdout_env_start,
+        "holdout_end": split.holdout_end,
+    }
+    payload: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "run_name": run_name,
+        "workflow_generation": int(workflow.generation),
+        "gauntlet_interval": interval,
+        "split": split_info,
+        "val_reset_key_uint32": out["val_reset_key_uint32"],
+        "hold_reset_key_uint32": out["hold_reset_key_uint32"],
+        "purged_hof_agent_ids": removed,
+        "per_agent_rows": per_agent_rows,
+        "global_15_snapshot": global_fifteen.to_snapshot_dicts(),
+    }
+    paths = _write_gauntlet_reports(eval_dir, generation=int(workflow.generation), payload=payload)
+    logger.info("HoF gauntlet report: %s | %s", paths["json"], paths["csv"])
 
 
 def _compat_mode_enabled() -> bool:
@@ -851,6 +1001,9 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
     val_obs, val_full, dates_val = slice_trading_timeline(
         data_array, data_array_full, dates_np, split.val_env_start, split.val_end
     )
+    holdout_obs, holdout_full, dates_holdout = slice_trading_timeline(
+        data_array, data_array_full, dates_np, split.holdout_env_start, split.holdout_end
+    )
 
     if compat_mode:
         _phase_log("Phase 2: Environment Setup")
@@ -890,6 +1043,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
 
     env = _make_env(train_obs, train_full, dates_train, is_training=True)
     val_env = _make_env(val_obs, val_full, dates_val, is_training=False)
+    holdout_env = _make_env(holdout_obs, holdout_full, dates_holdout, is_training=False)
 
     state = env.reset(key)
     logger.info("Train env reset OK; obs shape: %s", state.obs.shape)
@@ -968,6 +1122,23 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         len(hof),
     )
 
+    g15_capacity = int(OmegaConf.select(cfg, "population.global_15_capacity", default=15))
+    g15_dir = artifact_root / "global_15"
+    global_fifteen = GlobalFifteen(
+        capacity=g15_capacity,
+        checkpoint_dir=g15_dir,
+        cloud_sync=cloud_sync,
+        cloud_prefix=f"{cloud_project}/global_15",
+    )
+    global_fifteen.load()
+    logger.info(
+        "Global 15 ready: capacity=%d, loaded=%d entries (local=%s, cloud_prefix=%s)",
+        global_fifteen.capacity,
+        len(global_fifteen),
+        g15_dir,
+        global_fifteen.cloud_prefix,
+    )
+
     wf_cfg = build_trading_workflow_config(cfg)
     evaluator = MagicMock()
     workflow = create_trading_workflow(
@@ -977,6 +1148,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         config=wf_cfg,
         seed=int(cfg.seed),
         val_env=val_env,
+        holdout_env=holdout_env,
         hall_of_fame=hof,
     )
 
@@ -1118,6 +1290,16 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
                         run_name=run_name,
                         seed=int(cfg.seed),
                     )
+
+            _maybe_run_hof_gauntlet(
+                workflow=workflow,
+                hof=hof,
+                global_fifteen=global_fifteen,
+                cfg=cfg,
+                run_name=run_name,
+                eval_dir=eval_dir,
+                split=split,
+            )
 
         last = all_metrics[-1] if all_metrics else {}
         logger.info(
