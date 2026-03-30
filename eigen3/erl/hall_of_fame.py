@@ -458,7 +458,8 @@ class HallOfFame:
 
         if self.cloud_sync and self.cloud_sync.provider != "local":
             cloud_json = f"{self.cloud_prefix}/hall_of_fame.json"
-            self.cloud_sync.upload_file_verified(str(meta_path), cloud_json)
+            # Best-effort, non-blocking — training does not wait on GCS or MD5 verification.
+            self.cloud_sync.upload_file(str(meta_path), cloud_json, background=True)
 
             for entry in self.entries:
                 local_agent = self._agent_path(entry.agent_id)

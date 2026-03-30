@@ -115,6 +115,15 @@ stabilization_ghost_detection: false  # Abort if fitness drops below baseline
 gauntlet_num_slices: 20               # Eigen2 GAUNTLET_NUM_SLICES (vs 7 for normal)
 
 
+# ---------- Full training state (RNG, population, replay, env states) ----------
+# Required for --resume / population.resume=true. Written every ``save_interval`` generations.
+save_training_state: true
+
+# Resume: use ``python main.py --resume`` (optional path; default = last_run.json), or:
+#   python scripts/train.py population.resume=true population.resume_path=checkpoints/<run>
+resume: false
+resume_path: null
+
 # ---------- Compat checkpoints (best_agent.msgpack + evaluation_results bundle) ----------
 # HoF (local + GCS) and metrics_history.jsonl are unaffected.
 save_checkpoints: false

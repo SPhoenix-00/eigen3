@@ -27,6 +27,14 @@ def _parse_cli(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--raw-hydra", action="store_true")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="CHECKPOINT_DIR",
+        help="Resume from training_state.pkl under CHECKPOINT_DIR, or last_run.json if omitted.",
+    )
     return parser.parse_known_args(argv)
 
 
@@ -75,6 +83,10 @@ def main() -> None:
     )
     if opts.raw_hydra:
         os.environ["EIGEN3_COMPAT_MODE"] = "0"
+
+    if opts.resume is not None:
+        os.environ["EIGEN3_RESUME"] = "1"
+        os.environ["EIGEN3_RESUME_DIR"] = str(opts.resume)
 
     try:
         import jax

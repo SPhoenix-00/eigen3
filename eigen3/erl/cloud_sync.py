@@ -4,6 +4,10 @@ Supports Google Cloud Storage (GCS) with local-only fallback.  Adapted from
 Eigen2's ``utils/cloud_sync.py`` — trimmed to the subset required by the
 Hall of Fame (upload, download, delete, exists, verified upload).
 
+Training never depends on cloud success: uploads are best-effort, failures are
+logged, and nothing in the training loop waits on verification or completion.
+Replay buffers and full ``training_state.pkl`` checkpoints are never uploaded.
+
 Environment variables (GCS):
     CLOUD_PROVIDER   = "gcs"
     CLOUD_BUCKET     = "<bucket-name>"
@@ -17,8 +21,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import shutil
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal, Optional
@@ -28,8 +30,18 @@ logger = logging.getLogger(__name__)
 CloudProvider = Literal["gcs", "local"]
 
 
+def is_forbidden_cloud_upload_local_path(local_path: str) -> bool:
+    """True for full training checkpoints (replay + env state); never upload these."""
+    name = Path(local_path).name.lower()
+    if name in ("training_state.pkl", "training_state.pkl.tmp"):
+        return True
+    if name.startswith("training_state") and name.endswith(".pkl"):
+        return True
+    return False
+
+
 class CloudSync:
-    """Upload / download files to GCS (or stay local-only)."""
+    """Best-effort GCS uploads. Callers must not gate training on return values or completion."""
 
     def __init__(
         self,
@@ -49,7 +61,6 @@ class CloudSync:
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="CloudSync"
         )
-        self._lock = threading.Lock()
 
         if provider != "local":
             self._init_client()
@@ -106,15 +117,34 @@ class CloudSync:
     def upload_file(
         self, local_path: str, cloud_path: str, *, background: bool = True
     ) -> bool:
-        """Upload *local_path* to *cloud_path*.  Returns True on success."""
+        """Schedule or run an upload. Always returns True for local provider.
+
+        On GCS, failures are logged only; return value is informational for
+        foreground uploads. Background scheduling errors do not propagate.
+        """
         if self.provider == "local":
             return True
+        if is_forbidden_cloud_upload_local_path(local_path):
+            logger.warning(
+                "Skipping cloud upload (replay/training state stays local-only): %s",
+                local_path,
+            )
+            return True
         if background:
-            self._executor.submit(self._upload, local_path, cloud_path)
+            try:
+                self._executor.submit(self._upload, local_path, cloud_path)
+            except RuntimeError as exc:
+                logger.warning("Cloud upload not scheduled (executor stopped?): %s", exc)
             return True
         return self._upload(local_path, cloud_path)
 
     def _upload(self, local_path: str, cloud_path: str) -> bool:
+        if is_forbidden_cloud_upload_local_path(local_path):
+            logger.warning(
+                "Skipping cloud upload (replay/training state stays local-only): %s",
+                local_path,
+            )
+            return True
         try:
             blob = self.bucket.blob(cloud_path)
             blob.upload_from_filename(local_path)
@@ -124,8 +154,18 @@ class CloudSync:
             return False
 
     def upload_file_verified(self, local_path: str, cloud_path: str) -> bool:
-        """Upload then verify by comparing MD5 hashes."""
+        """Upload then verify by comparing MD5 hashes (synchronous; blocks caller).
+
+        Prefer :meth:`upload_file` with ``background=True`` for HoF paths so
+        training is not delayed on GCS or hash checks.
+        """
         if self.provider == "local":
+            return True
+        if is_forbidden_cloud_upload_local_path(local_path):
+            logger.warning(
+                "Skipping cloud upload (replay/training state stays local-only): %s",
+                local_path,
+            )
             return True
         if not self._upload(local_path, cloud_path):
             return False
@@ -192,6 +232,10 @@ class CloudSync:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def shutdown(self) -> None:
-        """Wait for pending background uploads then shut down the pool."""
-        self._executor.shutdown(wait=True)
+    def shutdown(self, *, wait: bool = False) -> None:
+        """Shut down the upload executor.
+
+        By default does not wait for in-flight uploads so process exit and
+        training teardown are never gated on GCS finishing.
+        """
+        self._executor.shutdown(wait=wait)

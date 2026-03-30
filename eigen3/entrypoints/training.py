@@ -30,6 +30,11 @@ from eigen3.data.splits import compute_train_val_holdout_split, slice_trading_ti
 from eigen3.environment.trading_env import TradingEnv
 from eigen3.models import Actor, DoubleCritic
 from eigen3.utils.gpu_memory import log_gpu_memory_report, should_log_gpu_memory_this_generation
+from eigen3.utils.training_checkpoint import (
+    load_training_checkpoint,
+    save_training_checkpoint,
+    training_state_path,
+)
 from eigen3.workflows import TradingWorkflowConfig, create_trading_workflow
 
 logger = logging.getLogger(__name__)
@@ -248,6 +253,42 @@ class CompatArtifactManager:
 
 def _compat_mode_enabled() -> bool:
     return os.environ.get("EIGEN3_COMPAT_MODE", "1") != "0"
+
+
+def _resolve_resume_run_dir(cfg: DictConfig, artifact_root: Path) -> Optional[Path]:
+    """Directory containing ``training_state.pkl`` (from CLI, Hydra, or ``last_run.json``)."""
+    env_resume = os.environ.get("EIGEN3_RESUME", "").strip().lower()
+    env_on = env_resume in ("1", "true", "yes")
+    resume_flag = bool(OmegaConf.select(cfg, "population.resume", default=False))
+    rp_cfg = OmegaConf.select(cfg, "population.resume_path", default=None)
+    path_hint = (str(rp_cfg).strip() if rp_cfg is not None else "") or os.environ.get(
+        "EIGEN3_RESUME_DIR", ""
+    ).strip()
+
+    use_resume = env_on or resume_flag or bool(path_hint)
+    if not use_resume:
+        return None
+
+    if path_hint:
+        p = Path(path_hint)
+        if not p.is_absolute():
+            p = Path(hydra.utils.to_absolute_path(path_hint))
+        if p.is_file():
+            p = p.parent
+        return p
+
+    last_run = artifact_root / "last_run.json"
+    if not last_run.is_file():
+        raise FileNotFoundError(
+            "Resume requested but no directory was given (``population.resume_path`` / "
+            "``--resume DIR``) and "
+            f"{last_run} is missing. Pass an explicit run directory."
+        )
+    data = json.loads(last_run.read_text(encoding="utf-8"))
+    ck = data.get("checkpoint_dir")
+    if not ck:
+        raise ValueError(f"{last_run} has no checkpoint_dir field")
+    return Path(ck)
 
 
 def _phase_log(label: str) -> None:
@@ -803,7 +844,6 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
     cloud_project = OmegaConf.select(cfg, "population.cloud_project_name", default="eigen3")
     cloud_sync = CloudSync.from_env(project_name=cloud_project)
 
-    run_name = str(OmegaConf.select(cfg, "run_name", default="run"))
     run_id = os.environ.get("EIGEN3_RUN_STAMP", datetime.now().strftime("%Y%m%d_%H%M%S"))
     artifact_root = Path(
         os.environ.get(
@@ -812,12 +852,21 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         )
     )
     eval_dir = Path(os.environ.get("EIGEN3_EVAL_DIR", str(artifact_root / "evaluation_results")))
-    checkpoint_root = Path(
+    default_checkpoint_root = Path(
         os.environ.get("EIGEN3_CHECKPOINT_ROOT", str(artifact_root / "checkpoints"))
     )
-    run_checkpoint_dir = checkpoint_root / run_name if compat_mode else Path(
-        hydra.utils.to_absolute_path("checkpoints")
-    )
+    resume_run_dir = _resolve_resume_run_dir(cfg, artifact_root)
+    if resume_run_dir is not None:
+        resume_run_dir = resume_run_dir.resolve()
+        checkpoint_root = resume_run_dir.parent
+        run_name = resume_run_dir.name
+        run_checkpoint_dir = resume_run_dir
+    else:
+        checkpoint_root = default_checkpoint_root
+        run_name = str(OmegaConf.select(cfg, "run_name", default="run"))
+        run_checkpoint_dir = checkpoint_root / run_name if compat_mode else Path(
+            hydra.utils.to_absolute_path("checkpoints")
+        )
     checkpoint_dir = run_checkpoint_dir
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -865,17 +914,55 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
 
     num_gen = int(OmegaConf.select(cfg, "population.total_generations", default=100))
     save_checkpoints = bool(OmegaConf.select(cfg, "population.save_checkpoints", default=True))
-    logger.info("Running %d generations (TradingERLWorkflow)...", num_gen)
+    save_training_state = bool(
+        OmegaConf.select(cfg, "population.save_training_state", default=True)
+    )
+    save_interval = max(1, int(OmegaConf.select(cfg, "population.save_interval", default=1)))
+
+    start_gen = 0
+    best_score = float("-inf")
+    if resume_run_dir is not None:
+        ckpt_file = training_state_path(checkpoint_dir)
+        if not ckpt_file.is_file():
+            raise FileNotFoundError(
+                f"Resume directory has no training checkpoint ({ckpt_file}). "
+                "Train with population.save_training_state=true (default) so "
+                "training_state.pkl is written every save_interval generations."
+            )
+        if compat_mode:
+            _phase_log("Phase 3b: Resume")
+        ck_info = load_training_checkpoint(ckpt_file, workflow)
+        best_score = float(ck_info["best_score"])
+        meta_seed = int(ck_info["meta"].get("seed", int(cfg.seed)))
+        if meta_seed != int(cfg.seed):
+            logger.warning(
+                "Checkpoint seed %s != config seed %s (continuing PRNG from checkpoint).",
+                meta_seed,
+                cfg.seed,
+            )
+        start_gen = int(workflow.generation)
+        if start_gen >= num_gen:
+            logger.info(
+                "Checkpoint generation %s >= population.total_generations=%s; nothing to run.",
+                start_gen,
+                num_gen,
+            )
+
+    logger.info(
+        "Running generations %s..%s of %s (TradingERLWorkflow)...",
+        start_gen + 1,
+        num_gen,
+        num_gen,
+    )
     if compat_mode:
         _phase_log("Phase 4: Training Loop")
     all_metrics: list[dict[str, Any]] = []
-    best_score = float("-inf")
     last: dict[str, Any] = {}
     prev_metrics: Optional[dict[str, Any]] = None
     prev_eval: Optional[dict[str, Any]] = None
     running_gen_seconds = 0.0
     try:
-        for gen in range(num_gen):
+        for gen in range(start_gen, num_gen):
             t_gen_wall_start = time.perf_counter()
             buffer_size = 0 if workflow._replay_buffer is None else int(workflow._replay_buffer.size)
             buffer_cap = workflow.config.replay_buffer_size
@@ -895,6 +982,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
             best_params_for_progress = jax.tree.map(lambda x: x[metrics["top5_indices"][0]], workflow._stacked_params) if top5_evals else workflow.get_last_best_agent()
             
             t_gen_wall_s = time.perf_counter() - t_gen_wall_start
+            gens_this_session = gen - start_gen + 1
             _print_generation_summary(
                 gen=gen + 1,
                 num_gen=num_gen,
@@ -902,7 +990,11 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
                 progress_eval=progress_eval,
                 prev_metrics=prev_metrics,
                 prev_eval=prev_eval,
-                avg_gen_seconds=(running_gen_seconds / gen) if gen > 0 else None,
+                avg_gen_seconds=(
+                    (running_gen_seconds / (gens_this_session - 1))
+                    if gens_this_session > 1
+                    else None
+                ),
                 top5_evals=top5_evals,
                 wall_clock_s=t_gen_wall_s,
             )
@@ -931,7 +1023,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
                         eval_payload["generation"] = int(metrics.get("generation", gen + 1))
                         eval_paths = artifact_mgr.write_evaluation_bundle(eval_payload)
                         logger.info(
-                            "✓ Saved & syncing to cloud | eval: %s",
+                            "✓ Saved locally | eval: %s (HoF cloud upload best-effort, non-blocking)",
                             eval_paths["json"],
                         )
                     else:
@@ -941,6 +1033,16 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
                             metrics.get("generation", gen + 1),
                             score,
                         )
+
+            if save_training_state and workflow.generation > 0:
+                if workflow.generation % save_interval == 0:
+                    save_training_checkpoint(
+                        checkpoint_dir,
+                        workflow,
+                        best_score=best_score,
+                        run_name=run_name,
+                        seed=int(cfg.seed),
+                    )
 
         last = all_metrics[-1] if all_metrics else {}
         logger.info(
@@ -979,4 +1081,4 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         return all_metrics
     finally:
         if hof.cloud_sync is not None:
-            hof.cloud_sync.shutdown()
+            hof.cloud_sync.shutdown(wait=False)
