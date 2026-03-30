@@ -30,8 +30,6 @@ from eigen3.environment.trading_env import TradingEnv
 from eigen3.models import Actor, DoubleCritic
 from eigen3.utils.gpu_memory import log_gpu_memory_report, should_log_gpu_memory_this_generation
 from eigen3.workflows import TradingWorkflowConfig, create_trading_workflow
-from evorl.agent import AgentState
-from evorl.sample_batch import SampleBatch
 
 logger = logging.getLogger(__name__)
 
@@ -371,6 +369,7 @@ def _top5_eval_rows_from_metrics(metrics: dict[str, Any]) -> list[tuple[int, flo
     rmin = metrics.get("top5_val_reward_min") or []
     gp = metrics.get("top5_gain_pct") or []
     bh = metrics.get("top5_bh_excess_usd") or []
+    wr = metrics.get("top5_win_rate") or []
     rows: list[tuple[int, float, dict[str, Any]]] = []
     for rank, idx in enumerate(indices):
         ev = {
@@ -378,80 +377,29 @@ def _top5_eval_rows_from_metrics(metrics: dict[str, Any]) -> list[tuple[int, flo
             "reward_min": rmin[rank] if rank < len(rmin) else 0.0,
             "gain_pct_mean": gp[rank] if rank < len(gp) else 0.0,
             "pnl_mean": bh[rank] if rank < len(bh) else 0.0,
-            "win_rate_mean": None,
+            "win_rate_mean": wr[rank] if rank < len(wr) else None,
         }
         fit = float(fitness_list[rank]) if rank < len(fitness_list) else float("nan")
         rows.append((int(idx), fit, ev))
     return rows
 
 
-def _evaluate_agent_on_env(
-    *,
-    env: TradingEnv,
-    agent: TradingAgent,
-    params: Any,
-    seed: int,
-    num_episodes: int = 3,
-) -> dict[str, Any]:
-    key = jax.random.PRNGKey(seed)
-    agent_state = AgentState(params=params)
-    episodes: list[dict[str, Any]] = []
+def _build_eval_payload_from_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Construct an evaluation bundle payload from vmapped eval data in metrics.
 
-    for _ in range(num_episodes):
-        key, reset_key = jax.random.split(key)
-        state = env.reset(reset_key)
-        total_reward = 0.0
-        steps = 0
-        # Batched host read: separate bool(done)/float(reward) sync twice per step and idle the GPU.
-        while True:
-            obs_batch = state.obs[None, ...]
-            sample = SampleBatch(obs=obs_batch)
-            key, act_key = jax.random.split(key)
-            actions, _ = agent.evaluate_actions(agent_state, sample, act_key)
-            action = actions[0]
-            state = env.step(state, action)
-            done_h, rew_h = jax.device_get((state.done, state.reward))
-            total_reward += float(rew_h)
-            steps += 1
-            if bool(done_h):
-                break
-
-        es = state.env_state
-        nt, nw, nl, tgp, tpnl, pce, dwp, dwo = jax.device_get(
-            (
-                es.num_trades,
-                es.num_wins,
-                es.num_losses,
-                es.total_gain_pct,
-                es.total_pnl,
-                es.peak_capital_employed,
-                es.days_with_positions,
-                es.days_without_positions,
-            )
-        )
-        episodes.append(
-            {
-                "total_reward": total_reward,
-                "steps": steps,
-                "num_trades": int(nt),
-                "num_wins": int(nw),
-                "num_losses": int(nl),
-                "total_gain_pct": float(tgp),
-                "total_pnl": float(tpnl),
-                "peak_capital_employed": float(pce),
-                "days_with_positions": int(dwp),
-                "days_without_positions": int(dwo),
-                "win_rate": float(nw) / max(int(nt), 1),
-            }
-        )
-
+    Replaces the sequential ``_evaluate_agent_on_env`` call with data already
+    captured during the batched population evaluation.
+    """
+    episodes = metrics.get("best_agent_eval_episodes", [])
+    if not episodes:
+        return {"num_episodes": 0, "episodes": []}
     rewards = np.asarray([e["total_reward"] for e in episodes], dtype=np.float64)
     pnls = np.asarray([e["total_pnl"] for e in episodes], dtype=np.float64)
     wins = np.asarray([e["win_rate"] for e in episodes], dtype=np.float64)
     trades = np.asarray([e["num_trades"] for e in episodes], dtype=np.float64)
     gains = np.asarray([e["total_gain_pct"] for e in episodes], dtype=np.float64)
     return {
-        "num_episodes": int(num_episodes),
+        "num_episodes": len(episodes),
         "reward_mean": float(rewards.mean()),
         "reward_std": float(rewards.std()),
         "reward_min": float(rewards.min()),
@@ -949,17 +897,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
                             generation=int(metrics.get("generation", gen + 1)),
                             score=score,
                         )
-                        _art_eps = min(
-                            3, int(OmegaConf.select(cfg, "population.eval_episodes", default=5))
-                        )
-                        logger.info("  Artifact validation rollouts (%d episode(s))...", _art_eps)
-                        eval_payload = _evaluate_agent_on_env(
-                            env=val_env,
-                            agent=agent,
-                            params=best_params,
-                            seed=int(cfg.seed) + gen + 1000,
-                            num_episodes=_art_eps,
-                        )
+                        eval_payload = _build_eval_payload_from_metrics(metrics)
                         eval_payload["run_name"] = run_name
                         eval_payload["generation"] = int(metrics.get("generation", gen + 1))
                         eval_paths = artifact_mgr.write_evaluation_bundle(eval_payload)

@@ -482,12 +482,15 @@ class TradingERLWorkflow:
         self,
         stacked_params: TradingNetworkParams,
         key: chex.PRNGKey,
-    ) -> Tuple[chex.Array, chex.Array, chex.Array]:
+    ) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, Dict[str, chex.Array]]:
         """Evaluate all agents in parallel.
 
         Returns:
             Tuple of ``(fitness, mean_bh_excess_usd, mean_total_gain_pct,
-            mean_episode_reward, min_episode_reward)``, each ``[pop_size]``.
+            mean_episode_reward, min_episode_reward, per_episode)``.  The first
+            five are each ``[pop_size]``; ``per_episode`` is a dict of
+            ``[n_episodes, pop_size]`` matrices with full episode detail
+            (rewards, PnL, trades, win/loss counts, etc.).
             Fitness is the mean of the ``conservative_k`` lowest episode total
             rewards.  Buy-hold excess and gain % are means over eval episodes
             (captured at first ``done`` per episode).  Mean/min episode reward
@@ -510,6 +513,14 @@ class TradingERLWorkflow:
         all_ep_rewards: list[chex.Array] = []
         all_ep_excess: list[chex.Array] = []
         all_ep_gain: list[chex.Array] = []
+        all_ep_pnl: list[chex.Array] = []
+        all_ep_num_trades: list[chex.Array] = []
+        all_ep_num_wins: list[chex.Array] = []
+        all_ep_num_losses: list[chex.Array] = []
+        all_ep_peak_capital: list[chex.Array] = []
+        all_ep_days_with_pos: list[chex.Array] = []
+        all_ep_days_without_pos: list[chex.Array] = []
+        all_ep_steps: list[chex.Array] = []
 
         vmap_excess = None
         if hasattr(self.eval_env, "episode_buyhold_excess_usd"):
@@ -524,6 +535,14 @@ class TradingERLWorkflow:
             done_mask = jnp.zeros(pop_size, dtype=jnp.bool_)
             ep_excess = jnp.zeros(pop_size)
             ep_gain = jnp.zeros(pop_size)
+            ep_pnl = jnp.zeros(pop_size)
+            ep_num_trades = jnp.zeros(pop_size, dtype=jnp.int32)
+            ep_num_wins = jnp.zeros(pop_size, dtype=jnp.int32)
+            ep_num_losses = jnp.zeros(pop_size, dtype=jnp.int32)
+            ep_peak_capital = jnp.zeros(pop_size)
+            ep_days_with_pos = jnp.zeros(pop_size, dtype=jnp.int32)
+            ep_days_without_pos = jnp.zeros(pop_size, dtype=jnp.int32)
+            ep_steps = jnp.zeros(pop_size, dtype=jnp.int32)
 
             for _ in range(max_steps):
                 key, step_key = random.split(key)
@@ -546,12 +565,29 @@ class TradingERLWorkflow:
                     next_states.env_state.total_gain_pct,
                     ep_gain,
                 )
+                es = next_states.env_state
+                ep_pnl = jnp.where(newly_done, es.total_pnl, ep_pnl)
+                ep_num_trades = jnp.where(newly_done, es.num_trades, ep_num_trades)
+                ep_num_wins = jnp.where(newly_done, es.num_wins, ep_num_wins)
+                ep_num_losses = jnp.where(newly_done, es.num_losses, ep_num_losses)
+                ep_peak_capital = jnp.where(newly_done, es.peak_capital_employed, ep_peak_capital)
+                ep_days_with_pos = jnp.where(newly_done, es.days_with_positions, ep_days_with_pos)
+                ep_days_without_pos = jnp.where(newly_done, es.days_without_positions, ep_days_without_pos)
+                ep_steps = ep_steps + (~done_mask).astype(jnp.int32)
                 done_mask = done_mask | next_states.done
                 env_states = next_states
 
             all_ep_rewards.append(ep_rewards)
             all_ep_excess.append(ep_excess)
             all_ep_gain.append(ep_gain)
+            all_ep_pnl.append(ep_pnl)
+            all_ep_num_trades.append(ep_num_trades)
+            all_ep_num_wins.append(ep_num_wins)
+            all_ep_num_losses.append(ep_num_losses)
+            all_ep_peak_capital.append(ep_peak_capital)
+            all_ep_days_with_pos.append(ep_days_with_pos)
+            all_ep_days_without_pos.append(ep_days_without_pos)
+            all_ep_steps.append(ep_steps)
 
         rewards_matrix = jnp.stack(all_ep_rewards, axis=0)  # [n_episodes, pop_size]
         excess_matrix = jnp.stack(all_ep_excess, axis=0)
@@ -566,7 +602,20 @@ class TradingERLWorkflow:
         mean_gain = jnp.mean(gain_matrix, axis=0)
         reward_mean = jnp.mean(rewards_matrix, axis=0)
         reward_min = jnp.min(rewards_matrix, axis=0)
-        return fitness, mean_excess, mean_gain, reward_mean, reward_min
+        per_episode: Dict[str, chex.Array] = {
+            "rewards": rewards_matrix,
+            "excess": excess_matrix,
+            "gain_pct": gain_matrix,
+            "pnl": jnp.stack(all_ep_pnl, axis=0),
+            "num_trades": jnp.stack(all_ep_num_trades, axis=0),
+            "num_wins": jnp.stack(all_ep_num_wins, axis=0),
+            "num_losses": jnp.stack(all_ep_num_losses, axis=0),
+            "peak_capital": jnp.stack(all_ep_peak_capital, axis=0),
+            "days_with_pos": jnp.stack(all_ep_days_with_pos, axis=0),
+            "days_without_pos": jnp.stack(all_ep_days_without_pos, axis=0),
+            "steps": jnp.stack(all_ep_steps, axis=0),
+        }
+        return fitness, mean_excess, mean_gain, reward_mean, reward_min, per_episode
 
     # ------------------------------------------------------------------
     # Phase 4 — Genetic operators
@@ -695,7 +744,7 @@ class TradingERLWorkflow:
         # Phase 3 — evaluate population (vmapped)
         t_eval_start = time.perf_counter()
         self.key, eval_key = random.split(self.key)
-        fitness_scores, bh_excess, gain_pct, reward_mean_arr, reward_min_arr = (
+        fitness_scores, bh_excess, gain_pct, reward_mean_arr, reward_min_arr, per_episode = (
             self._evaluate_population(self._stacked_params, eval_key)
         )
         t_eval_s = time.perf_counter() - t_eval_start
@@ -708,6 +757,8 @@ class TradingERLWorkflow:
         rew_min_np = np.asarray(jax.device_get(reward_min_arr))
         self._last_best_idx = int(np.argmax(fit_np))
 
+        per_ep_np = {k: np.asarray(jax.device_get(v)) for k, v in per_episode.items()}
+
         n_agents = int(fit_np.size)
         top_k = min(5, n_agents)
         if top_k > 0:
@@ -717,6 +768,29 @@ class TradingERLWorkflow:
         else:
             top5_indices = []
             top5_fitness = []
+
+        _wr_per_ep = per_ep_np["num_wins"] / np.maximum(per_ep_np["num_trades"], 1)
+        win_rate_np = np.mean(_wr_per_ep, axis=0)  # [pop_size]
+
+        n_eval_eps = per_ep_np["rewards"].shape[0]
+        best_episodes: List[Dict[str, Any]] = []
+        bi = self._last_best_idx
+        for ep_i in range(n_eval_eps):
+            nt = int(per_ep_np["num_trades"][ep_i, bi])
+            nw = int(per_ep_np["num_wins"][ep_i, bi])
+            best_episodes.append({
+                "total_reward": float(per_ep_np["rewards"][ep_i, bi]),
+                "steps": int(per_ep_np["steps"][ep_i, bi]),
+                "num_trades": nt,
+                "num_wins": nw,
+                "num_losses": int(per_ep_np["num_losses"][ep_i, bi]),
+                "total_gain_pct": float(per_ep_np["gain_pct"][ep_i, bi]),
+                "total_pnl": float(per_ep_np["pnl"][ep_i, bi]),
+                "peak_capital_employed": float(per_ep_np["peak_capital"][ep_i, bi]),
+                "days_with_positions": int(per_ep_np["days_with_pos"][ep_i, bi]),
+                "days_without_positions": int(per_ep_np["days_without_pos"][ep_i, bi]),
+                "win_rate": float(nw) / max(nt, 1),
+            })
 
         # Phase 3b — Hall of Fame
         t_hof_start = time.perf_counter()
@@ -787,6 +861,8 @@ class TradingERLWorkflow:
             "top5_val_reward_min": [float(rew_min_np[i]) for i in top5_indices],
             "top5_gain_pct": [float(gain_np[i]) for i in top5_indices],
             "top5_bh_excess_usd": [float(bh_np[i]) for i in top5_indices],
+            "top5_win_rate": [float(win_rate_np[i]) for i in top5_indices],
+            "best_agent_eval_episodes": best_episodes,
             "timing_collect_s": float(t_collect_s),
             "timing_train_s": float(t_train_s),
             "timing_eval_s": float(t_eval_s),
@@ -838,7 +914,7 @@ class TradingERLWorkflow:
             raise ValueError("Population not initialized. Run at least one generation first.")
 
         self.key, eval_key = random.split(self.key)
-        fitness, _, _, _, _ = self._evaluate_population(self._stacked_params, eval_key)
+        fitness, _, _, _, _, _ = self._evaluate_population(self._stacked_params, eval_key)
         best_idx = int(jnp.argmax(fitness))
 
         return jax.tree.map(lambda x: x[best_idx], self._stacked_params)
