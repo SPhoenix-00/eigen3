@@ -281,36 +281,21 @@ def _print_generation_summary(
 
     bsz = int(metrics.get("buffer_size", 0))
     bcap = max(1, int(metrics.get("buffer_capacity", 1)))
-    t_init = float(metrics.get("timing_init_s", 0.0))
-    t_eval = float(metrics.get("timing_eval_s", 0.0))
-    t_train = float(metrics.get("timing_train_s", 0.0))
-    t_collect = float(metrics.get("timing_collect_s", 0.0))
-    t_stats = float(metrics.get("timing_stats_s", 0.0))
-    t_evolve = float(metrics.get("timing_evolve_s", 0.0))
-    t_hof = float(metrics.get("timing_hof_s", 0.0))
+    phases = [
+        ("Init", float(metrics.get("timing_init_s", 0.0))),
+        ("Collect", float(metrics.get("timing_collect_s", 0.0))),
+        ("Train", float(metrics.get("timing_train_s", 0.0))),
+        ("Eval", float(metrics.get("timing_eval_s", 0.0))),
+        ("Stats", float(metrics.get("timing_stats_s", 0.0))),
+        ("HoF", float(metrics.get("timing_hof_s", 0.0))),
+        ("Evolve", float(metrics.get("timing_evolve_s", 0.0))),
+    ]
     t_total = float(metrics.get("timing_total_s", 0.0))
-    t_accounted = t_init + t_collect + t_train + t_eval + t_stats + t_hof + t_evolve
-    t_overhead = max(0.0, t_total - t_accounted)
     t_wall = wall_clock_s or t_total
     t_outer = max(0.0, t_wall - t_total)
     remaining = max(0, num_gen - gen)
     eta_s = (avg_gen_seconds or t_wall) * remaining
 
-    print("\n--- Generation Timing Breakdown ---")
-    if t_init > 0.01:
-        print(f"  Init:       {t_init:.2f}s ({_pct(t_init, t_wall):.1f}%)")
-    print(f"  Collect:    {t_collect:.2f}s ({_pct(t_collect, t_wall):.1f}%)")
-    print(f"  Training:   {t_train:.2f}s ({_pct(t_train, t_wall):.1f}%)")
-    print(f"  Evaluation: {t_eval:.2f}s ({_pct(t_eval, t_wall):.1f}%)")
-    print(f"  Stats:      {t_stats:.2f}s ({_pct(t_stats, t_wall):.1f}%)")
-    print(f"  HoF:        {t_hof:.2f}s ({_pct(t_hof, t_wall):.1f}%)")
-    print(f"  Evolution:  {t_evolve:.2f}s ({_pct(t_evolve, t_wall):.1f}%)")
-    if t_overhead > 0.01:
-        print(f"  Other:      {t_overhead:.2f}s ({_pct(t_overhead, t_wall):.1f}%)")
-    if t_outer > 0.01:
-        print(f"  Outer:      {t_outer:.2f}s ({_pct(t_outer, t_wall):.1f}%)")
-    print(f"  Wall clock: {t_wall:.2f}s")
-    print("-" * 40)
     print("\n" + "=" * 70)
     print(f"  Gen {gen}/{num_gen} | {_fmt_time(t_wall)} | ETA {_fmt_time(eta_s)}")
     print("=" * 70)
@@ -340,14 +325,14 @@ def _print_generation_summary(
         for rank, (idx, fitness, ev) in enumerate(top5_evals, 1):
             roi = ev.get('gain_pct_mean', 0.0)
             pnl = ev.get('pnl_mean', 0.0)
+            bh_excess = ev.get('bh_excess', 0.0)
             wr_raw = ev.get("win_rate_mean", None)
             wr_str = "  N/A" if wr_raw is None else f"{float(wr_raw) * 100.0:5.1f}%"
             r_mean = ev.get('reward_mean', 0.0)
-            r_min = ev.get('reward_min', 0.0)
             print(
                 f"  {rank}. Agent {idx:2d}: Fitness={fitness:8.2f}, "
-                f"Val=[mean:{r_mean:6.2f}, min:{r_min:6.2f}], ROI={roi:6.2f}%, "
-                f"PnL=${pnl:8.2f}, WR={wr_str}"
+                f"Val={r_mean:7.2f}, ROI={roi:6.2f}%, "
+                f"PnL=${pnl:8.2f} ({bh_excess:+.2f}), WR={wr_str}"
             )
     else:
         print("  (No Top 5 stats available)")
@@ -363,16 +348,22 @@ def _print_generation_summary(
             f"({metrics.get('hof_worst_bh_excess', 0.0):+.2f} vs equal-weight b&h)"
         )
         print(f"  Median ROI: {metrics.get('hof_median_roi', 0.0):.2f}%")
-    print("\n  LOOP PERFORMANCE")
+    print("\n  TIMING")
+    print("  -------------------------------------------------------")
+    visible = [(name, t) for name, t in phases if t >= 1.0]
+    hidden = sum(t for _, t in phases if t < 1.0) + t_outer
+    parts = []
+    for name, t in visible:
+        parts.append(f"{name}: {_fmt_time(t)} ({_pct(t, t_wall):.0f}%)")
+    if hidden >= 0.01:
+        parts.append(f"Other: {_fmt_time(hidden)} ({_pct(hidden, t_wall):.0f}%)")
+    print(f"  {' | '.join(parts)}")
+    print(f"  Wall clock: {_fmt_time(t_wall)}")
+
+    print(f"\n  BUFFER")
     print("  -------------------------------------------------------")
     print(
-        f"  Eval: {_fmt_time(t_eval)} ({_pct(t_eval, t_wall):.0f}%)  |  "
-        f"Train: {_fmt_time(t_train)} ({_pct(t_train, t_wall):.0f}%)  |  "
-        f"Collect: {_fmt_time(t_collect)} ({_pct(t_collect, t_wall):.0f}%)  |  "
-        f"Evolve: {_fmt_time(t_evolve)} ({_pct(t_evolve, t_wall):.0f}%)"
-    )
-    print(
-        f"  Buffer: {bsz:,}/{bcap:,} ({100.0 * bsz / bcap:.1f}%)  |  "
+        f"  {bsz:,}/{bcap:,} ({100.0 * bsz / bcap:.1f}%)  |  "
         f"Env steps: {metrics.get('total_env_steps', 0):,}"
     )
     print("\n" + "=" * 70 + "\n")
@@ -386,17 +377,17 @@ def _top5_eval_rows_from_metrics(metrics: dict[str, Any]) -> list[tuple[int, flo
     indices = metrics.get("top5_indices") or []
     fitness_list = metrics.get("top5_fitness") or []
     rm = metrics.get("top5_val_reward_mean") or []
-    rmin = metrics.get("top5_val_reward_min") or []
     gp = metrics.get("top5_gain_pct") or []
+    pnl = metrics.get("top5_pnl") or []
     bh = metrics.get("top5_bh_excess_usd") or []
     wr = metrics.get("top5_win_rate") or []
     rows: list[tuple[int, float, dict[str, Any]]] = []
     for rank, idx in enumerate(indices):
         ev = {
             "reward_mean": rm[rank] if rank < len(rm) else 0.0,
-            "reward_min": rmin[rank] if rank < len(rmin) else 0.0,
             "gain_pct_mean": gp[rank] if rank < len(gp) else 0.0,
-            "pnl_mean": bh[rank] if rank < len(bh) else 0.0,
+            "pnl_mean": pnl[rank] if rank < len(pnl) else 0.0,
+            "bh_excess": bh[rank] if rank < len(bh) else 0.0,
             "win_rate_mean": wr[rank] if rank < len(wr) else None,
         }
         fit = float(fitness_list[rank]) if rank < len(fitness_list) else float("nan")
@@ -830,7 +821,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         capacity=hof_capacity,
         checkpoint_dir=checkpoint_dir,
         cloud_sync=cloud_sync,
-        cloud_prefix=f"{cloud_project}/hall_of_fame",
+        cloud_prefix=f"{cloud_project}/{run_name}/hall_of_fame",
     )
     hof.load()
     logger.info(
