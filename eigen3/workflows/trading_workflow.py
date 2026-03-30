@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import logging
 import time
 
+import numpy as np
 import chex
 import jax
 import jax.numpy as jnp
@@ -490,11 +491,9 @@ class TradingERLWorkflow:
                 done_mask = done_mask | next_states.done
                 env_states = next_states
 
-                # Avoid wasting GPU cycles once every agent is done.  The
-                # host round-trip for the bool check is cheap relative to a
-                # full redundant env-step kernel.
-                if bool(jnp.all(done_mask)):
-                    break
+                # Do not `bool(jnp.all(done_mask))` here: it syncs host every step and
+                # tanks utilization; nvidia-smi then looks idle.  Extra steps after all
+                # envs are done are masked out in ep_rewards (see jnp.where above).
 
             total_rewards = total_rewards + ep_rewards
 
@@ -628,8 +627,11 @@ class TradingERLWorkflow:
         t_eval_start = time.perf_counter()
         self.key, eval_key = random.split(self.key)
         fitness_scores = self._evaluate_population(self._stacked_params, eval_key)
-        self._last_best_idx = int(jnp.argmax(fitness_scores))
         t_eval_s = time.perf_counter() - t_eval_start
+
+        # One host copy for stats + HoF; avoid float(fitness_scores[i]) per agent (N syncs).
+        fit_np = np.asarray(jax.device_get(fitness_scores))
+        self._last_best_idx = int(np.argmax(fit_np))
 
         # Phase 3b — Hall of Fame
         t_hof_start = time.perf_counter()
@@ -638,15 +640,15 @@ class TradingERLWorkflow:
             hof_candidates = [
                 (
                     population_list[i],
-                    float(fitness_scores[i]),
+                    float(fit_np[i]),
                     i,
                     0.0,
                     0.0,
                     0.0,
                     0,
                     0,
-                    float(fitness_scores[i]),
-                    float(fitness_scores[i]),
+                    float(fit_np[i]),
+                    float(fit_np[i]),
                 )
                 for i in range(self._pop_size)
             ]
@@ -680,19 +682,19 @@ class TradingERLWorkflow:
 
         metrics: Dict[str, Any] = {
             "generation": self.generation,
-            "mean_fitness": float(jnp.mean(fitness_scores)),
-            "max_fitness": float(jnp.max(fitness_scores)),
-            "min_fitness": float(jnp.min(fitness_scores)),
-            "std_fitness": float(jnp.std(fitness_scores)),
+            "mean_fitness": float(fit_np.mean()),
+            "max_fitness": float(fit_np.max()),
+            "min_fitness": float(fit_np.min()),
+            "std_fitness": float(fit_np.std()),
             "total_env_steps": self.total_env_steps,
             "best_agent_idx": int(self._last_best_idx) if self._last_best_idx is not None else -1,
-            "best_agent_fitness": float(jnp.max(fitness_scores)),
+            "best_agent_fitness": float(fit_np.max()),
             "buffer_size": int(self._replay_buffer.size) if self._replay_buffer is not None else 0,
             "buffer_capacity": int(self.config.replay_buffer_size),
             "collect_reward_total": float(collect_reward),
             "collect_reward_mean_per_agent": float(collect_reward) / float(self._pop_size),
             "population_size": int(self._pop_size),
-            "positive_agents": int(jnp.sum(fitness_scores > 0.0)),
+            "positive_agents": int(np.sum(fit_np > 0.0)),
             "timing_collect_s": float(t_collect_s),
             "timing_train_s": float(t_train_s),
             "timing_eval_s": float(t_eval_s),
