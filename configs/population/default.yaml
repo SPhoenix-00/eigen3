@@ -11,13 +11,13 @@
 
 
 # ---------- Population ----------
-pop_size: 96                          # Eigen2 POPULATION_SIZE (96 distributed, 48 local)
+pop_size: 48                          # Eigen2 POPULATION_SIZE (96 distributed, 48 local)
 local_pop_size: 48                    # Eigen2 LOCAL_POPULATION_SIZE
 
 # Selection (fraction-based, as in Eigen2)
-elite_frac: 0.40                      # Eigen2 ELITE_FRAC — top 40% survive unchanged
+elite_frac: 0.20                      # Eigen2 ELITE_FRAC — top 40% survive unchanged
 offspring_frac: 0.40                  # Eigen2 OFFSPRING_FRAC — 40% bred from elites
-# mutant_frac is the remainder (20%)
+# mutant_frac is the remainder (40%)
 
 
 # ---------- Genetic Operators ----------
