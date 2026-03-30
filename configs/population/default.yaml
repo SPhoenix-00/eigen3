@@ -46,10 +46,10 @@ champion_injection: true              # Also inject all-time best validation age
 
 # ---------- Replay Buffer ----------
 replay_buffer_size: 1500000           # Eigen2 BUFFER_SIZE (multi-GPU / pmap)
-# Single-GPU: loss vmap is chunked (local_training_agent_batch_size), so replay can be larger than the pre-chunk 180k default.
-local_replay_buffer_size: 400000      # ~11 GiB float32 obs+next_obs at 151x18x1; lower if nvidia-smi is tight
+# Single-GPU: smaller cap → ring buffer turns over in ~20–30 gens at 48×320 transitions/gen (fresher off-policy data).
+local_replay_buffer_size: 320000      # ~9 GiB float32 obs+next_obs at 151×18×1; tune with nvidia-smi
 min_buffer_size: 23200                # Eigen2 MIN_BUFFER_SIZE — start training after this many transitions
-local_min_buffer_size: 8000           # Eigen2 LOCAL_MIN_BUFFER_SIZE (~1 generation)
+local_min_buffer_size: 15000          # ~one generation of data at pop 48 × steps_per_agent 320 before DDPG updates
 min_buffer_size_sweep: 5000           # Eigen2 MIN_BUFFER_SIZE_SWEEP (faster DDPG for sweeps)
 warmup_episodes: 10                   # Fill buffer with random rollouts before first RL update
 
@@ -60,7 +60,7 @@ batch_size: 160                       # Used when enable_pmap or num_devices>1
 local_batch_size: 96
 gradient_accumulation_steps: 1        # Eigen2 GRADIENT_ACCUMULATION_STEPS
 local_gradient_accumulation_steps: 1  # Eigen2 LOCAL_GRADIENT_ACCUMULATION_STEPS
-gradient_steps_per_gen: 16            # Eigen2 GRADIENT_STEPS_PER_GENERATION
+gradient_steps_per_gen: 24            # Scales with larger collect; Eigen2 ref was 16
 gradient_steps_per_gen_stabilization: 10  # Eigen2 GRADIENT_STEPS_PER_GENERATION_STABILIZATION
 local_gradient_steps_per_gen: 32      # Eigen2 LOCAL_GRADIENT_STEPS_PER_GENERATION
 local_gradient_steps_per_gen_stabilization: 16  # Eigen2 LOCAL_GRADIENT_STEPS_PER_GENERATION_STABILIZATION
@@ -77,7 +77,8 @@ skip_reevaluation_on_resume: true     # Skip re-eval on resume unless reward fun
 
 # ---------- Training Cadence ----------
 # Env steps collected per agent per generation (before gradient updates).
-steps_per_agent: 100
+# ~320 aligns with a typical calendar episode length (mono); was 100 (too thin per gen).
+steps_per_agent: 320
 total_generations: 100                # Eigen2 NUM_GENERATIONS (gauntlet may stop earlier)
 max_generations_gauntlet: 100         # Eigen2 MAX_GENERATIONS_GAUNTLET — hard ceiling
 save_interval: 1                      # Eigen2 SAVE_FREQUENCY (1 = every gen for safety)
