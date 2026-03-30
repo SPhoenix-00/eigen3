@@ -26,6 +26,11 @@ wandb_tags:
 wandb_notes: "JAX-based ERL for stock trading"
 wandb_mode: "disabled"  # "online", "offline", or "disabled"
 
+# GPU VRAM (JAX memory_stats + nvidia-smi when available)
+log_gpu_memory: true
+# 0 = after workflow init + after first generation only; 1 = every generation; N = first + every Nth
+log_gpu_memory_every_n_generations: 0
+
 # Logging intervals
 log_interval: 1  # Log metrics every N generations
 log_agent_params: false  # Log parameter histograms (can be expensive)

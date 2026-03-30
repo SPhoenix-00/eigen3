@@ -45,8 +45,8 @@ champion_injection: true              # Also inject all-time best validation age
 
 
 # ---------- Replay Buffer ----------
-replay_buffer_size: 1500000           # Eigen2 BUFFER_SIZE
-local_replay_buffer_size: 180000      # Eigen2 LOCAL_BUFFER_SIZE (16 gens of data)
+replay_buffer_size: 1500000           # Eigen2 BUFFER_SIZE (multi-GPU / pmap)
+local_replay_buffer_size: 180000      # Single-GPU default (num_devices=1, enable_pmap=false)
 min_buffer_size: 23200                # Eigen2 MIN_BUFFER_SIZE — start training after this many transitions
 local_min_buffer_size: 8000           # Eigen2 LOCAL_MIN_BUFFER_SIZE (~1 generation)
 min_buffer_size_sweep: 5000           # Eigen2 MIN_BUFFER_SIZE_SWEEP (faster DDPG for sweeps)
@@ -54,8 +54,8 @@ warmup_episodes: 10                   # Fill buffer with random rollouts before 
 
 
 # ---------- Batch & Gradient Sizing ----------
-batch_size: 160                       # Eigen2 BATCH_SIZE
-local_batch_size: 40                  # Eigen2 LOCAL_BATCH_SIZE (fits ~18 GB VRAM)
+batch_size: 160                       # Used when enable_pmap or num_devices>1
+local_batch_size: 40                  # Single-GPU gradient batch (num_devices=1, enable_pmap=false)
 gradient_accumulation_steps: 1        # Eigen2 GRADIENT_ACCUMULATION_STEPS
 local_gradient_accumulation_steps: 1  # Eigen2 LOCAL_GRADIENT_ACCUMULATION_STEPS
 gradient_steps_per_gen: 16            # Eigen2 GRADIENT_STEPS_PER_GENERATION

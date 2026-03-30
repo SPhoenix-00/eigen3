@@ -55,3 +55,59 @@ def test_tournament_size_clamped_to_population():
     wfc = build_trading_workflow_config(cfg)
     assert wfc.population_size == 2
     assert wfc.tournament_size == 2
+
+
+def test_single_gpu_uses_local_batch_and_replay():
+    cfg = OmegaConf.create(
+        {
+            "enable_pmap": False,
+            "num_devices": 1,
+            "population": {
+                "pop_size": 8,
+                "elite_frac": 0.25,
+                "tournament_size": 2,
+                "mutation_rate": 0.1,
+                "mutation_std": 0.02,
+                "genetic_crossover_rate": 0.5,
+                "gradient_steps_per_gen": 2,
+                "batch_size": 160,
+                "local_batch_size": 32,
+                "replay_buffer_size": 1_000_000,
+                "local_replay_buffer_size": 5000,
+                "eval_episodes": 1,
+                "steps_per_agent": 10,
+            },
+            "agent": {"actor_update_interval": 2},
+        }
+    )
+    wfc = build_trading_workflow_config(cfg)
+    assert wfc.batch_size == 32
+    assert wfc.replay_buffer_size == 5000
+
+
+def test_multi_device_uses_global_batch_and_replay():
+    cfg = OmegaConf.create(
+        {
+            "enable_pmap": False,
+            "num_devices": 2,
+            "population": {
+                "pop_size": 8,
+                "elite_frac": 0.25,
+                "tournament_size": 2,
+                "mutation_rate": 0.1,
+                "mutation_std": 0.02,
+                "genetic_crossover_rate": 0.5,
+                "gradient_steps_per_gen": 2,
+                "batch_size": 160,
+                "local_batch_size": 32,
+                "replay_buffer_size": 900_000,
+                "local_replay_buffer_size": 5000,
+                "eval_episodes": 1,
+                "steps_per_agent": 10,
+            },
+            "agent": {"actor_update_interval": 2},
+        }
+    )
+    wfc = build_trading_workflow_config(cfg)
+    assert wfc.batch_size == 160
+    assert wfc.replay_buffer_size == 900_000

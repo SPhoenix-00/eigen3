@@ -28,6 +28,7 @@ from eigen3.data import load_trading_data
 from eigen3.data.splits import compute_train_val_holdout_split, slice_trading_timeline
 from eigen3.environment.trading_env import TradingEnv
 from eigen3.models import Actor, DoubleCritic
+from eigen3.utils.gpu_memory import log_gpu_memory_report, should_log_gpu_memory_this_generation
 from eigen3.workflows import TradingWorkflowConfig, create_trading_workflow
 from evorl.agent import AgentState
 from evorl.sample_batch import SampleBatch
@@ -300,6 +301,31 @@ def _short_class(path: Optional[str]) -> str:
     return s.rsplit(".", maxsplit=1)[-1]
 
 
+def _single_gpu_workflow_mode(cfg: DictConfig) -> bool:
+    """True when we run one device without pmap (use local batch / replay sizes)."""
+    pmap = bool(OmegaConf.select(cfg, "enable_pmap", default=False))
+    n_dev = int(OmegaConf.select(cfg, "num_devices", default=1))
+    return (not pmap) and n_dev == 1
+
+
+def _effective_workflow_batch_size(cfg: DictConfig) -> int:
+    """Gradient batch: ``local_batch_size`` on single-GPU, else ``batch_size``."""
+    default = int(OmegaConf.select(cfg, "population.batch_size", default=160))
+    if not _single_gpu_workflow_mode(cfg):
+        return default
+    local = OmegaConf.select(cfg, "population.local_batch_size", default=None)
+    return int(local) if local is not None else default
+
+
+def _effective_replay_buffer_size(cfg: DictConfig) -> int:
+    """Replay capacity: ``local_replay_buffer_size`` on single-GPU, else full size."""
+    default = int(OmegaConf.select(cfg, "population.replay_buffer_size", default=1_500_000))
+    if not _single_gpu_workflow_mode(cfg):
+        return default
+    local = OmegaConf.select(cfg, "population.local_replay_buffer_size", default=None)
+    return int(local) if local is not None else default
+
+
 def run_config_summary(cfg: DictConfig) -> str:
     """Compact startup summary for the console."""
 
@@ -340,8 +366,8 @@ def run_config_summary(cfg: DictConfig) -> str:
             "-------- Population --",
             f"  pop_size: {S('population.pop_size', '?')!s}   "
             f"generations: {S('population.total_generations', '?')!s}   "
-            f"batch: {S('population.batch_size', '?')!s}",
-            f"  replay: {S('population.replay_buffer_size', '?')!s}   "
+            f"batch: {_effective_workflow_batch_size(cfg)}",
+            f"  replay: {_effective_replay_buffer_size(cfg)}   "
             f"grad_steps/gen: {S('population.gradient_steps_per_gen', '?')!s}   "
             f"eval_episodes: {S('population.eval_episodes', '?')!s}",
             f"  steps_per_agent/gen: {S('population.steps_per_agent', '?')!s}",
@@ -351,6 +377,8 @@ def run_config_summary(cfg: DictConfig) -> str:
             f"tensorboard: {S('logging.use_tensorboard', False)!s}   "
             f"wandb: {S('logging.wandb_project', '?')!s} "
             f"({S('logging.wandb_mode', '?')!s})",
+            f"  gpu_memory: {S('logging.log_gpu_memory', True)!s}   "
+            f"every_n_gen: {S('logging.log_gpu_memory_every_n_generations', 0)!s}",
             "----------------------",
             "  Full config: Hydra run dir -> .hydra/config.yaml (+ overrides.yaml).",
             "",
@@ -425,10 +453,8 @@ def build_trading_workflow_config(cfg: DictConfig) -> TradingWorkflowConfig:
         gradient_steps_per_gen=int(
             OmegaConf.select(cfg, "population.gradient_steps_per_gen", default=16)
         ),
-        batch_size=int(OmegaConf.select(cfg, "population.batch_size", default=160)),
-        replay_buffer_size=int(
-            OmegaConf.select(cfg, "population.replay_buffer_size", default=1_500_000)
-        ),
+        batch_size=_effective_workflow_batch_size(cfg),
+        replay_buffer_size=_effective_replay_buffer_size(cfg),
         eval_episodes=int(OmegaConf.select(cfg, "population.eval_episodes", default=5)),
         target_update_period=target_update_period,
         steps_per_agent=steps_per_agent,
@@ -686,6 +712,11 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         hall_of_fame=hof,
     )
 
+    log_vram = bool(OmegaConf.select(cfg, "logging.log_gpu_memory", default=True))
+    vram_interval = int(OmegaConf.select(cfg, "logging.log_gpu_memory_every_n_generations", default=0))
+    if log_vram:
+        log_gpu_memory_report(logger, "workflow initialized (replay + compiled graphs warm)")
+
     num_gen = int(OmegaConf.select(cfg, "population.total_generations", default=100))
     logger.info("Running %d generations (TradingERLWorkflow)...", num_gen)
     if compat_mode:
@@ -694,6 +725,8 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
     best_score = float("-inf")
     for gen in range(num_gen):
         metrics = workflow.run_generation()
+        if log_vram and should_log_gpu_memory_this_generation(vram_interval, gen):
+            log_gpu_memory_report(logger, f"after generation {gen + 1}/{num_gen}")
         all_metrics.append(metrics)
         print(
             f"Generation {gen + 1}/{num_gen}  "
