@@ -115,3 +115,6 @@ coverage.xml
 # Profiling
 *.prof
 *.lprof
+
+# Local eigen2 tree (entire directory)
+eigen2/
