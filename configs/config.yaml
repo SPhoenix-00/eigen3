@@ -3,7 +3,8 @@
 defaults:
   - agent: trading_erl
   - env: trading_mono
-  - population: default
+  # Off-policy sizing + single-GPU VRAM headroom (extends population/default).
+  - population: offpolicy_vram_headroom
   - logging: default
   - _self_
 

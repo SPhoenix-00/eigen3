@@ -1,0 +1,35 @@
+# ============================================================================
+# Off-policy + single-GPU VRAM headroom (~19 GiB free on an 80 GiB card)
+# ============================================================================
+# Extends population/default.yaml. Use:
+#   python scripts/train.py population=offpolicy_vram_headroom
+#
+# Rationale (steps 1–5):
+#   1) local_batch_size — lower gradient noise per step (fits in freed buffer VRAM).
+#   2) gradient_steps_per_gen — more SGD per gen; almost no extra static VRAM.
+#   3) local_training_agent_batch_size — wider loss vmap (fewer chunks); raises
+#      *peak* during training — stepped 8→16, not full pop, to stay safe.
+#   4) steps_per_agent — more fresh transitions per generation vs replay reuse.
+#   5) local_replay_buffer_size — slightly smaller ring → faster turnover / fresher
+#      mix; frees a few GiB to pay for (1) and (3).
+#
+# If nvidia-smi peak > ~78 GiB, drop local_batch_size to 112 or training chunk to 12.
+# ============================================================================
+
+defaults:
+  - default
+
+# (1) Was 96. ~+33% batch mem vs 96; pair with (5) so net VRAM stays controlled.
+local_batch_size: 128
+
+# (2) Was 24. Pure extra work per gen; no larger replay tensor.
+gradient_steps_per_gen: 32
+
+# (3) Was 8. 6 chunks → 3 chunks over pop 48; monitor peak before 24 or 48.
+local_training_agent_batch_size: 16
+
+# (4) Was 320. ~20% more on-policy data per gen before the same gradient block.
+steps_per_agent: 384
+
+# (5) Was 320000. Frees VRAM and increases turnover; raise back if you want older tails.
+local_replay_buffer_size: 280000
