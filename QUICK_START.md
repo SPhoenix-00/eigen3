@@ -90,21 +90,31 @@ scp -P <port> Eigen3_Processed_OUTPUT.pkl root@<pod-ip>:/workspace/eigen3/
 ```
 
 Training reads **`env.data_path`** from `configs/env/trading_mono.yaml`
-(default: `Eigen3_Processed_OUTPUT.pkl` in the **repo root**). `scripts/train.py`
-resolves that path against your real working directory (Hydra’s output folder
-does not break relative paths).
+(default: `Eigen3_Processed_OUTPUT.pkl` in the **repo root**). Hydra resolves
+paths from your real working directory (the run’s output folder does not break
+relative paths).
 
 - Put the pickle (or CSV) in the repo root next to `scripts/`, **or** edit
   `data_path` in `configs/env/trading_mono.yaml`, **or** override once:
-  `python scripts/train.py env.data_path=/path/to/table.pkl`.
+  `python main.py env.data_path=/path/to/table.pkl` (same as `scripts/train.py`).
 
 If you build the table on the pod with **`python process_eigen_data.py`**
 (from the repo root), the script **rewrites** `data_path` in
 `configs/env/trading_mono.yaml` after each successful PKL write (including
 custom `--output-pkl` names).
 
-If no data file is found, `train.py` falls back to synthetic data so you can
+If no data file is found, training falls back to synthetic data so you can
 smoke-test the full stack without uploading anything.
+
+---
+
+## Quick reference: how to start training
+
+| Command | Notes |
+|---------|--------|
+| `python main.py` | Same Hydra defaults as below; also writes `evaluation_results/training_log_<timestamp>.txt` mirroring the console. |
+| `python main.py env.data_path=foo.pkl population.pop_size=48` | Any [Hydra override](https://hydra.cc/docs/advanced/override_grammar/basic/) after the script name. |
+| `python scripts/train.py ...` | Identical behavior **without** the evaluation-results tee (unless you set `EIGEN3_TRAINING_LOG` yourself). |
 
 ---
 
@@ -161,13 +171,16 @@ cd /workspace/eigen3
 
 # Default run loads Eigen3_Processed_OUTPUT.pkl from the repo root (see trading_mono.yaml).
 # If the file is missing, training uses synthetic data.
+python main.py
+
+# Same as above without the evaluation_results/ console log file:
 python scripts/train.py
 
 # Optional: different file without editing the YAML
-python scripts/train.py env.data_path=/path/to/other.pkl
+python main.py env.data_path=/path/to/other.pkl
 
 # Override population sizing (data path unchanged):
-python scripts/train.py \
+python main.py \
     population.pop_size=48 \
     population.hof_capacity=10 \
     seed=123
@@ -177,10 +190,12 @@ python scripts/train.py \
 
 1. Data is loaded and split into **train / validation / holdout** timelines.
 2. Train and validation `TradingEnv` instances are created.
-3. Actor and Critic networks are initialised and shapes are verified.
+3. Actor and Critic networks are initialised; **TradingERLWorkflow** runs for
+   `population.total_generations`, printing per-generation fitness to the console
+   (and to `evaluation_results/training_log_*.txt` when using `main.py`).
 4. The **Hall of Fame** connects to GCS (or falls back to local) and restores
-   any previously saved agents.
-5. Population config is logged so you can sanity-check sizing.
+   any previously saved agents; it is updated each generation.
+5. Hydra writes the full resolved config under `outputs/<date>/<time>/.hydra/`.
 
 ---
 
@@ -226,7 +241,7 @@ Use `tmux` or `screen` so training survives SSH disconnects:
 tmux new -s eigen3
 source /workspace/eigen3/.venv/bin/activate
 cd /workspace/eigen3
-python scripts/train.py
+python main.py
 # Ctrl-b d  to detach
 # tmux attach -t eigen3  to reconnect
 ```
@@ -237,7 +252,9 @@ python scripts/train.py
 
 ```
 eigen3/
+├── main.py                      # Convenience CLI (Hydra + tee log under evaluation_results/)
 ├── gcs-credentials.json         # GCS service-account key (gitignored locally; upload on the pod)
+├── evaluation_results/          # training_log_*.txt when using main.py
 ├── configs/
 │   ├── config.yaml              # top-level Hydra config
 │   ├── agent/trading_erl.yaml   # DDPG + network architecture
@@ -252,6 +269,7 @@ eigen3/
 │   ├── workflows/               # TradingERLWorkflow
 │   ├── erl/                     # Hall of Fame + CloudSync (NEW)
 │   ├── data/                    # data_loader, mono_loader, splits
+│   ├── entrypoints/             # run_training (Hydra → workflow)
 │   └── utils/
 ├── evorl/                       # EvoRL framework (git submodule)
 ├── scripts/

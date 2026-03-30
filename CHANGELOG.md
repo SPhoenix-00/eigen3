@@ -6,6 +6,10 @@ All notable changes to Eigen3 are documented here.
 
 ### Added
 
+- **`eigen3/entrypoints/training.py`**: `run_training(cfg)` loads data, train/val split, `TradingEnv`, Hall of Fame, `TradingAgent`, and runs **`TradingERLWorkflow.train()`** for `population.total_generations`. `build_trading_workflow_config(cfg)` maps Hydra to `TradingWorkflowConfig` and clamps `elite_size` / `tournament_size` to `pop_size`. Optional console tee when env var **`EIGEN3_TRAINING_LOG`** is set.
+- **`main.py`** (repo root): sets `EIGEN3_TRAINING_LOG` to `evaluation_results/training_log_<timestamp>.txt`, then runs `scripts/train.py` with the same argv (Hydra overrides unchanged).
+- **`configs/population/default.yaml`**: **`steps_per_agent`** (env steps per agent per generation) and **`genetic_crossover_rate`** (uniform crossover mask in the workflow).
+- **`tests/unit/test_workflow_config_mapping.py`**: Tests for Hydra → `TradingWorkflowConfig` mapping and tournament clamping.
 - **Per-episode reward/penalty** (`episode_reward_multiplier`, default `1.0`): At episode end, adds `(agent_dollar_PnL − benchmark_PnL) × multiplier` to the final step reward. The benchmark is buy-and-hold with the agent's **peak capital employed** (max sum of entry prices across all steps) invested equally in investable stocks from episode start to end. New state fields `peak_capital_employed` and `total_pnl` in `TradingEnvState`; `DEFAULT_EPISODE_REWARD_MULTIPLIER` in **`eigen3/config.py`**; key in both env YAML configs; plumbed through `scripts/train.py`.
 - **`eigen3/config.py`**: Central defaults for trading reward shaping (`DEFAULT_HURDLE_RATE`, `DEFAULT_CONVICTION_SCALING_POWER`, `DEFAULT_LOSS_PENALTY_MULTIPLIER`, `DEFAULT_EPISODE_REWARD_MULTIPLIER`). Used by `TradingEnv` constructor defaults and `scripts/train.py` Hydra fallbacks; **`configs/env/trading.yaml`** and **`configs/env/trading_mono.yaml`** mirror the same values for runs.
 - **`eigen3/data/splits.py`**: `compute_train_val_holdout_split`, `slice_trading_timeline`, `build_train_val_holdout_arrays`, and `TrainValHoldoutSplit`. Splits the timeline into **training**, a fixed **validation** row band immediately before holdout, and **holdout** (rows touched only by the **last** valid calendar episode, matching `TradingEnv` scheduling). Validation width is `ceil(validation_reserve_multiplier × episode_trading_rows)` for that final episode.
@@ -23,6 +27,8 @@ All notable changes to Eigen3 are documented here.
 
 ### Changed
 
+- **`scripts/train.py`**: Thin Hydra entry point; delegates to `eigen3.entrypoints.training.run_training(cfg)`.
+- **Run summary logging**: ASCII-only section headers in `run_config_summary` for Windows consoles (cp1252).
 - **Reward shaping defaults**: Hurdle rate **0.5%** (`hurdle_rate: 0.005`), **linear** coefficient scaling (`conviction_scaling_power: 1.0`), loss penalty multiplier **1.25** (`loss_penalty_multiplier: 1.25`), applied via **`eigen3/config.py`** and **`configs/env/*.yaml`** (replacing prior 0.6% hurdle, power 1.25, multiplier 1.0).
 - **Data (train / validation / holdout)**:
   - **DataConfig** / **StockDataLoader**: Removed fractional `train_split` and unused Eigen2-style `validation_days` / `committee_holdout_days`. Splits now use `trading_period_days`, `settlement_period_days`, optional `episode_calendar_days`, and `validation_reserve_multiplier`, aligned with `TradingEnv` calendar episodes.

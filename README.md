@@ -31,17 +31,19 @@ Eigen3 combines Deep Reinforcement Learning (DDPG) with Evolutionary Algorithms 
 ### Training
 - **Population-based ERL**: 16 agents with genetic operators
 - **DDPG updates**: Gradient-based learning with replay buffer
-- **Train / validation / holdout**: The timeline is split into three contiguous row ranges. **Holdout** is the tail of rows used only by the **last** valid calendar episode (same rules as `TradingEnv`; default primary window **364** inclusive calendar days via `dates_ordinal`). **Validation** is the `ceil(env.validation_reserve_multiplier × episode_trading_rows)` rows immediately before holdout, where `episode_trading_rows` is the trading row span of that final episode; `TradingEnv.reset` picks a **random** valid start inside that slice. **Training** is everything before the validation band. Configure `validation_reserve_multiplier` in `configs/env/trading.yaml` or `trading_mono.yaml`. See `eigen3.data.splits.compute_train_val_holdout_split` and `scripts/train.py`. For `TradingERLWorkflow`, pass `eval_env` set to a `TradingEnv` built on the validation slice only (`is_training=False`).
+- **Train / validation / holdout**: The timeline is split into three contiguous row ranges. **Holdout** is the tail of rows used only by the **last** valid calendar episode (same rules as `TradingEnv`; default primary window **364** inclusive calendar days via `dates_ordinal`). **Validation** is the `ceil(env.validation_reserve_multiplier × episode_trading_rows)` rows immediately before holdout, where `episode_trading_rows` is the trading row span of that final episode; `TradingEnv.reset` picks a **random** valid start inside that slice. **Training** is everything before the validation band. Configure `validation_reserve_multiplier` in `configs/env/trading.yaml` or `trading_mono.yaml`. See `eigen3.data.splits.compute_train_val_holdout_split` and `eigen3.entrypoints.training` (used by `scripts/train.py`). For `TradingERLWorkflow`, pass `eval_env` set to a `TradingEnv` built on the validation slice only (`is_training=False`).
 
 ## Project Structure
 
 ```
 eigen3/
+├── main.py              # Optional: same Hydra CLI as scripts/train.py + tee log under evaluation_results/
 ├── eigen3/               # Main package
 │   ├── models/          # Neural network architectures
 │   ├── environment/     # Trading environment
 │   ├── agents/          # DDPG agent implementation
 │   ├── workflows/       # Custom ERL workflows
+│   ├── entrypoints/     # run_training(cfg) — data, envs, HoF, TradingERLWorkflow
 │   ├── data/            # Data loading and preprocessing
 │   └── utils/           # Utility functions
 ├── configs/             # Hydra configuration files
@@ -130,12 +132,17 @@ From the repository root, ensure the package is importable (`pip install -e .` o
 # Default: env=trading_mono (mono PKL/CSV or synthetic if path missing)
 python scripts/train.py
 
+# Same Hydra overrides, plus a mirrored console log under evaluation_results/
+python main.py
+
 # Legacy Eigen2 npy bundle
 python scripts/train.py env=trading env.data_path=data/raw
 
-# Overrides
-python scripts/train.py env.data_path=path/to/table.pkl agent=trading_erl seed=42
+# Overrides (Hydra)
+python scripts/train.py env.data_path=path/to/table.pkl seed=42 population.pop_size=48
 ```
+
+Training runs **`TradingERLWorkflow`** for `population.total_generations` after loading data and building train/validation `TradingEnv` instances and the Hall of Fame. Implementation: [`eigen3/entrypoints/training.py`](eigen3/entrypoints/training.py).
 
 ### 3. Evaluate Model
 
@@ -157,10 +164,10 @@ Example configuration override:
 
 ```bash
 python scripts/train.py \
-    agent=trading_erl \
-    pop_size=32 \
-    rl_updates_per_gen=64 \
-    mutation_strength=0.05
+    population.pop_size=48 \
+    population.total_generations=50 \
+    population.batch_size=40 \
+    seed=123
 ```
 
 ## Key Features

@@ -26,6 +26,8 @@ mutation_rate_consistency: 0.15       # Eigen2 MUTATION_RATE_CONSISTENCY (lower 
 mutation_std: 0.025                   # Eigen2 MUTATION_STD — Gaussian noise magnitude
 crossover_alpha_min: 0.2              # Eigen2 CROSSOVER_ALPHA_MIN
 crossover_alpha_max: 0.8              # Eigen2 CROSSOVER_ALPHA_MAX
+# Uniform crossover mask probability in TradingERLWorkflow (not the same as alpha blend in Eigen2).
+genetic_crossover_rate: 0.5
 tournament_size: 3
 
 # Adaptive mutation: auto-boosts 1.5x when validation plateaus for 3 gens (<2%)
@@ -72,6 +74,8 @@ skip_reevaluation_on_resume: true     # Skip re-eval on resume unless reward fun
 
 
 # ---------- Training Cadence ----------
+# Env steps collected per agent per generation (before gradient updates).
+steps_per_agent: 100
 total_generations: 100                # Eigen2 NUM_GENERATIONS (gauntlet may stop earlier)
 max_generations_gauntlet: 100         # Eigen2 MAX_GENERATIONS_GAUNTLET — hard ceiling
 save_interval: 1                      # Eigen2 SAVE_FREQUENCY (1 = every gen for safety)
