@@ -682,10 +682,11 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
             "EIGEN3_ARTIFACT_ROOT",
             str(Path(hydra.utils.to_absolute_path("."))),
         )
-    )
-    default_checkpoint_root = Path(
-        os.environ.get("EIGEN3_CHECKPOINT_ROOT", str(artifact_root / "checkpoints"))
-    )
+    ).resolve()
+
+    from eigen3.utils.run_naming import resolved_checkpoint_root
+
+    default_checkpoint_root = resolved_checkpoint_root(artifact_root)
     cloud_project = OmegaConf.select(cfg, "population.cloud_project_name", default="eigen3")
 
     from eigen3.erl.cloud_sync import CloudSync
@@ -705,7 +706,6 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         if wandb_style:
             from eigen3.utils.run_naming import generate_wandb_style_run_name
 
-            default_checkpoint_root.mkdir(parents=True, exist_ok=True)
             run_name = generate_wandb_style_run_name(default_checkpoint_root)
         else:
             run_name = str(OmegaConf.select(cfg, "run_name", default="run"))
@@ -717,6 +717,14 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
             cfg.run_name = run_name
     except Exception:
         pass
+
+    # Claim the run directory immediately so a second launch sees it for suffix
+    # allocation (otherwise names stay at *-1 until late mkdir after env build).
+    if resume_dir is None:
+        try:
+            (default_checkpoint_root / run_name).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("Early run directory create failed (will retry later): %s", exc)
 
     hof_cloud_prefix = f"{cloud_project}/{run_name}/hall_of_fame"
     ck_banner_path = str(resume_dir) if resume_dir is not None else str(

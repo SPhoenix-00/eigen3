@@ -12,6 +12,8 @@
 
 # ---------- Run naming (Wandb-style: adjective-noun-N under checkpoints/) ----------
 # When true (default), ``run_name`` is generated as e.g. ``cosmic-thunder-1``.
+# Suffix increments per adjective-noun pair under the stable checkpoint root
+# (``EIGEN3_CHECKPOINT_ROOT``, or repo ``checkpoints/`` when using plain Hydra).
 # Set false to use top-level ``run_name`` from config (e.g. Hydra ``${now:...}``).
 wandb_style_run_name: true
 

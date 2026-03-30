@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import random
 import re
 from pathlib import Path
@@ -54,6 +55,27 @@ _ADJECTIVES: tuple[str, ...] = (
     "mystic",
     "radiant",
 )
+
+def resolved_checkpoint_root(artifact_root: Path) -> Path:
+    """Directory used for run folders and suffix scanning.
+
+    Uses a **stable** path across Hydra output dirs: when neither
+    ``EIGEN3_CHECKPOINT_ROOT`` nor ``EIGEN3_ARTIFACT_ROOT`` is set, this is
+    ``<hydra original cwd>/checkpoints`` (repo-level), not the per-job Hydra
+    working directory (which would be empty on every new launch).
+    """
+    raw = os.environ.get("EIGEN3_CHECKPOINT_ROOT")
+    if raw:
+        return Path(raw).expanduser().resolve()
+    if os.environ.get("EIGEN3_ARTIFACT_ROOT"):
+        return (artifact_root / "checkpoints").resolve()
+    try:
+        from hydra.utils import get_original_cwd
+
+        return (Path(get_original_cwd()) / "checkpoints").resolve()
+    except Exception:
+        return (artifact_root / "checkpoints").resolve()
+
 
 _NOUNS: tuple[str, ...] = (
     "thunder",
@@ -108,10 +130,11 @@ _NOUNS: tuple[str, ...] = (
 
 def next_index_for_adjective_noun(checkpoint_root: Path, adj: str, noun: str) -> int:
     """Return the next free integer suffix for ``adj-noun-*`` under *checkpoint_root*."""
+    root = checkpoint_root.resolve()
     pat = re.compile(rf"^{re.escape(adj)}-{re.escape(noun)}-(\d+)$")
     max_n = 0
-    if checkpoint_root.is_dir():
-        for p in checkpoint_root.iterdir():
+    if root.is_dir():
+        for p in root.iterdir():
             if p.is_dir():
                 m = pat.match(p.name)
                 if m:
@@ -125,13 +148,14 @@ def generate_wandb_style_run_name(
     rng: random.Random | None = None,
 ) -> str:
     """Pick ``adjective-noun-N``; *N* increments for existing dirs with the same pair."""
-    checkpoint_root.mkdir(parents=True, exist_ok=True)
+    root = checkpoint_root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
     r = rng or random.Random()
     for _ in range(256):
         adj = r.choice(_ADJECTIVES)
         noun = r.choice(_NOUNS)
-        n = next_index_for_adjective_noun(checkpoint_root, adj, noun)
+        n = next_index_for_adjective_noun(root, adj, noun)
         name = f"{adj}-{noun}-{n}"
-        if not (checkpoint_root / name).exists():
+        if not (root / name).exists():
             return name
     return f"{adj}-{noun}-{n}-{r.randint(10000, 99999)}"
