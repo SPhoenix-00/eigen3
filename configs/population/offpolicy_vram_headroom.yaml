@@ -13,22 +13,21 @@
 #   5) local_replay_buffer_size — slightly smaller ring → faster turnover / fresher
 #      mix; frees a few GiB to pay for (1) and (3).
 #
-# 128×16 loss vmap peaked ~70GiB (OOM on 80GiB). That is only slightly over budget;
-# we trim a bit from batch and vmap width instead of halving both (64×8 was overly safe).
-# If you still OOM: try batch 88 or chunk 10; if you have headroom: nudge batch toward 112.
+# 128×16 loss vmap peaked ~70GiB (OOM on 80GiB). 96×12 ran ~61/80GiB steady — room to
+# nudge. 112×14 is a modest push; if you OOM on first train, drop to 104×12 or 96×14.
 # ============================================================================
 
 defaults:
   - default
 
-# (1) Modest step down from 128 (~12% fewer activations per sample than 128×16).
-local_batch_size: 96
+# (1) Between 96 and 128; raises SGD batch noise reduction vs 96.
+local_batch_size: 112
 
 # (2) Was 24. Pure extra work per gen; no larger replay tensor.
 gradient_steps_per_gen: 32
 
-# (3) Between 8 and 16: 4 chunks × pop 48, lower peak than 16-wide vmap.
-local_training_agent_batch_size: 12
+# (3) 14-wide vmap: 4 chunks for pop 48 (14+14+14+6); fewer dispatches than 12-wide.
+local_training_agent_batch_size: 14
 
 # (4) Was 320. ~20% more on-policy data per gen before the same gradient block.
 steps_per_agent: 384
