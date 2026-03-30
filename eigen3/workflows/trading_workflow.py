@@ -729,11 +729,17 @@ class TradingERLWorkflow:
         t_gen_start = time.perf_counter()
         self.key, gen_key = random.split(self.key)
 
+        t_init_s = 0.0
         if self._stacked_params is None:
+            print("  > Init...", end="", flush=True)
+            t_init_start = time.perf_counter()
             self.key, init_key = random.split(self.key)
             self._initialize_population(init_key)
+            t_init_s = time.perf_counter() - t_init_start
+            print(f" {t_init_s:.1f}s", flush=True)
 
         # Phase 1 — collect experience (vmapped)
+        print("  > Collect...", end="", flush=True)
         t_collect_start = time.perf_counter()
         self.key, collect_key = random.split(self.key)
         self._env_states, self._replay_buffer, _, collect_reward = (
@@ -747,8 +753,10 @@ class TradingERLWorkflow:
         )
         self.total_env_steps += self.config.steps_per_agent * self._pop_size
         t_collect_s = time.perf_counter() - t_collect_start
+        print(f" {t_collect_s:.1f}s", flush=True)
 
         # Phase 2 — gradient updates (vmapped loss)
+        print("  > Train...", end="", flush=True)
         t_train_start = time.perf_counter()
         grad_metrics: Dict[str, float] = {}
         if self._replay_buffer.size >= self.config.batch_size:
@@ -757,16 +765,20 @@ class TradingERLWorkflow:
                 self._stacked_params, self._replay_buffer, grad_key,
             )
         t_train_s = time.perf_counter() - t_train_start
+        print(f" {t_train_s:.1f}s", flush=True)
 
         # Phase 3 — evaluate population (vmapped)
+        print("  > Eval...", end="", flush=True)
         t_eval_start = time.perf_counter()
         self.key, eval_key = random.split(self.key)
         fitness_scores, bh_excess, gain_pct, reward_mean_arr, reward_min_arr, per_episode = (
             self._evaluate_population(self._stacked_params, eval_key)
         )
         t_eval_s = time.perf_counter() - t_eval_start
+        print(f" {t_eval_s:.1f}s", flush=True)
 
         # One host copy for stats + HoF; avoid float(fitness_scores[i]) per agent (N syncs).
+        t_stats_start = time.perf_counter()
         fit_np = np.asarray(jax.device_get(fitness_scores))
         bh_np = np.asarray(jax.device_get(bh_excess))
         gain_np = np.asarray(jax.device_get(gain_pct))
@@ -809,7 +821,10 @@ class TradingERLWorkflow:
                 "win_rate": float(nw) / max(nt, 1),
             })
 
+        t_stats_s = time.perf_counter() - t_stats_start
+
         # Phase 3b — Hall of Fame
+        print("  > HoF...", end="", flush=True)
         t_hof_start = time.perf_counter()
         if self.hof is not None:
             population_list = unstack_params(self._stacked_params, self._pop_size)
@@ -842,8 +857,10 @@ class TradingERLWorkflow:
                     self.hof.get_stats()["best_score"],
                 )
         t_hof_s = time.perf_counter() - t_hof_start
+        print(f" {t_hof_s:.1f}s", flush=True)
 
         # Phase 4 — selection + breeding
+        print("  > Evolve...", end="", flush=True)
         t_evolve_start = time.perf_counter()
         self.key, breed_key = random.split(self.key)
         self._stacked_params = self._breed_next_generation(
@@ -855,6 +872,7 @@ class TradingERLWorkflow:
         if self.hof is not None:
             self.hof.save()
         t_evolve_s = time.perf_counter() - t_evolve_start
+        print(f" {t_evolve_s:.1f}s", flush=True)
         t_total_s = time.perf_counter() - t_gen_start
 
         metrics: Dict[str, Any] = {
@@ -882,9 +900,11 @@ class TradingERLWorkflow:
             "top5_bh_excess_usd": [float(bh_np[i]) for i in top5_indices],
             "top5_win_rate": [float(win_rate_np[i]) for i in top5_indices],
             "best_agent_eval_episodes": best_episodes,
+            "timing_init_s": float(t_init_s),
             "timing_collect_s": float(t_collect_s),
             "timing_train_s": float(t_train_s),
             "timing_eval_s": float(t_eval_s),
+            "timing_stats_s": float(t_stats_s),
             "timing_hof_s": float(t_hof_s),
             "timing_evolve_s": float(t_evolve_s),
             "timing_total_s": float(t_total_s),

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
@@ -261,6 +262,7 @@ def _print_generation_summary(
     prev_eval: Optional[dict[str, Any]] = None,
     avg_gen_seconds: Optional[float] = None,
     top5_evals: Optional[list] = None,
+    wall_clock_s: Optional[float] = None,
 ) -> None:
     def _delta(curr: float, prev: Optional[float], suffix: str = "") -> str:
         if prev is None:
@@ -279,25 +281,38 @@ def _print_generation_summary(
 
     bsz = int(metrics.get("buffer_size", 0))
     bcap = max(1, int(metrics.get("buffer_capacity", 1)))
+    t_init = float(metrics.get("timing_init_s", 0.0))
     t_eval = float(metrics.get("timing_eval_s", 0.0))
     t_train = float(metrics.get("timing_train_s", 0.0))
     t_collect = float(metrics.get("timing_collect_s", 0.0))
+    t_stats = float(metrics.get("timing_stats_s", 0.0))
     t_evolve = float(metrics.get("timing_evolve_s", 0.0))
     t_hof = float(metrics.get("timing_hof_s", 0.0))
-    t_total = float(metrics.get("timing_total_s", t_eval + t_train + t_collect + t_evolve + t_hof))
+    t_total = float(metrics.get("timing_total_s", 0.0))
+    t_accounted = t_init + t_collect + t_train + t_eval + t_stats + t_hof + t_evolve
+    t_overhead = max(0.0, t_total - t_accounted)
+    t_wall = wall_clock_s or t_total
+    t_outer = max(0.0, t_wall - t_total)
     remaining = max(0, num_gen - gen)
-    eta_s = (avg_gen_seconds or t_total) * remaining
+    eta_s = (avg_gen_seconds or t_wall) * remaining
 
     print("\n--- Generation Timing Breakdown ---")
-    print(f"  Collect:    {t_collect:.2f}s ({_pct(t_collect, t_total):.1f}%)")
-    print(f"  Evaluation: {t_eval:.2f}s ({_pct(t_eval, t_total):.1f}%)")
-    print(f"  Training:   {t_train:.2f}s ({_pct(t_train, t_total):.1f}%)")
-    print(f"  HoF:        {t_hof:.2f}s ({_pct(t_hof, t_total):.1f}%)")
-    print(f"  Evolution:  {t_evolve:.2f}s ({_pct(t_evolve, t_total):.1f}%)")
-    print(f"  Total:      {t_total:.2f}s")
+    if t_init > 0.01:
+        print(f"  Init:       {t_init:.2f}s ({_pct(t_init, t_wall):.1f}%)")
+    print(f"  Collect:    {t_collect:.2f}s ({_pct(t_collect, t_wall):.1f}%)")
+    print(f"  Training:   {t_train:.2f}s ({_pct(t_train, t_wall):.1f}%)")
+    print(f"  Evaluation: {t_eval:.2f}s ({_pct(t_eval, t_wall):.1f}%)")
+    print(f"  Stats:      {t_stats:.2f}s ({_pct(t_stats, t_wall):.1f}%)")
+    print(f"  HoF:        {t_hof:.2f}s ({_pct(t_hof, t_wall):.1f}%)")
+    print(f"  Evolution:  {t_evolve:.2f}s ({_pct(t_evolve, t_wall):.1f}%)")
+    if t_overhead > 0.01:
+        print(f"  Other:      {t_overhead:.2f}s ({_pct(t_overhead, t_wall):.1f}%)")
+    if t_outer > 0.01:
+        print(f"  Outer:      {t_outer:.2f}s ({_pct(t_outer, t_wall):.1f}%)")
+    print(f"  Wall clock: {t_wall:.2f}s")
     print("-" * 40)
     print("\n" + "=" * 70)
-    print(f"  Gen {gen}/{num_gen} | {_fmt_time(t_total)} | ETA {_fmt_time(eta_s)}")
+    print(f"  Gen {gen}/{num_gen} | {_fmt_time(t_wall)} | ETA {_fmt_time(eta_s)}")
     print("=" * 70)
     print("\n  POPULATION")
     print("  -------------------------------------------------------")
@@ -351,10 +366,10 @@ def _print_generation_summary(
     print("\n  LOOP PERFORMANCE")
     print("  -------------------------------------------------------")
     print(
-        f"  Eval: {_fmt_time(t_eval)} ({_pct(t_eval, t_total):.0f}%)  |  "
-        f"Train: {_fmt_time(t_train)} ({_pct(t_train, t_total):.0f}%)  |  "
-        f"Collect: {_fmt_time(t_collect)} ({_pct(t_collect, t_total):.0f}%)  |  "
-        f"Evolve: {_fmt_time(t_evolve)} ({_pct(t_evolve, t_total):.0f}%)"
+        f"  Eval: {_fmt_time(t_eval)} ({_pct(t_eval, t_wall):.0f}%)  |  "
+        f"Train: {_fmt_time(t_train)} ({_pct(t_train, t_wall):.0f}%)  |  "
+        f"Collect: {_fmt_time(t_collect)} ({_pct(t_collect, t_wall):.0f}%)  |  "
+        f"Evolve: {_fmt_time(t_evolve)} ({_pct(t_evolve, t_wall):.0f}%)"
     )
     print(
         f"  Buffer: {bsz:,}/{bcap:,} ({100.0 * bsz / bcap:.1f}%)  |  "
@@ -855,6 +870,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
     running_gen_seconds = 0.0
     try:
         for gen in range(num_gen):
+            t_gen_wall_start = time.perf_counter()
             buffer_size = 0 if workflow._replay_buffer is None else int(workflow._replay_buffer.size)
             buffer_cap = workflow.config.replay_buffer_size
             pct = 100.0 * buffer_size / buffer_cap if buffer_cap > 0 else 0.0
@@ -872,6 +888,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
             progress_eval = top5_evals[0][2] if top5_evals else {}
             best_params_for_progress = jax.tree.map(lambda x: x[metrics["top5_indices"][0]], workflow._stacked_params) if top5_evals else workflow.get_last_best_agent()
             
+            t_gen_wall_s = time.perf_counter() - t_gen_wall_start
             _print_generation_summary(
                 gen=gen + 1,
                 num_gen=num_gen,
@@ -881,8 +898,9 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
                 prev_eval=prev_eval,
                 avg_gen_seconds=(running_gen_seconds / gen) if gen > 0 else None,
                 top5_evals=top5_evals,
+                wall_clock_s=t_gen_wall_s,
             )
-            running_gen_seconds += float(metrics.get("timing_total_s", 0.0))
+            running_gen_seconds += t_gen_wall_s
             prev_metrics = metrics
             prev_eval = progress_eval
             if artifact_mgr is not None:
