@@ -1,4 +1,9 @@
-"""Wandb-style run names: ``adjective-noun-N`` with incrementing *N* per pair."""
+"""Wandb-style run names: ``adjective-noun-N`` with a **global** incrementing *N*.
+
+*N* is one greater than the largest numeric suffix among existing run directories
+under the checkpoint root (not per adjective–noun pair), so successive launches
+get ``…-1``, ``…-2``, … even when the random words change each time.
+"""
 
 from __future__ import annotations
 
@@ -128,6 +133,23 @@ _NOUNS: tuple[str, ...] = (
 )
 
 
+_RUN_DIR_SUFFIX = re.compile(r"^[a-z]+-[a-z]+-(\d+)$")
+
+
+def next_global_run_suffix(checkpoint_root: Path) -> int:
+    """Return ``1 + max(N)`` for every existing ``<word>-<word>-N`` run directory."""
+    root = checkpoint_root.resolve()
+    max_n = 0
+    if root.is_dir():
+        for p in root.iterdir():
+            if not p.is_dir() or p.name.startswith("."):
+                continue
+            m = _RUN_DIR_SUFFIX.match(p.name)
+            if m:
+                max_n = max(max_n, int(m.group(1)))
+    return max_n + 1
+
+
 def next_index_for_adjective_noun(checkpoint_root: Path, adj: str, noun: str) -> int:
     """Return the next free integer suffix for ``adj-noun-*`` under *checkpoint_root*."""
     root = checkpoint_root.resolve()
@@ -147,15 +169,16 @@ def generate_wandb_style_run_name(
     *,
     rng: random.Random | None = None,
 ) -> str:
-    """Pick ``adjective-noun-N``; *N* increments for existing dirs with the same pair."""
+    """Pick random ``adjective`` and ``noun``; suffix *N* is global (max existing + 1)."""
     root = checkpoint_root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     r = rng or random.Random()
-    for _ in range(256):
+    n = next_global_run_suffix(root)
+    for _ in range(512):
         adj = r.choice(_ADJECTIVES)
         noun = r.choice(_NOUNS)
-        n = next_index_for_adjective_noun(root, adj, noun)
         name = f"{adj}-{noun}-{n}"
         if not (root / name).exists():
             return name
+        n += 1
     return f"{adj}-{noun}-{n}-{r.randint(10000, 99999)}"

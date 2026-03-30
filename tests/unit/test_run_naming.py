@@ -4,6 +4,14 @@ from pathlib import Path
 import eigen3.utils.run_naming as rn
 
 
+def test_next_global_run_suffix(tmp_path: Path):
+    assert rn.next_global_run_suffix(tmp_path) == 1
+    (tmp_path / "swift-river-1").mkdir()
+    assert rn.next_global_run_suffix(tmp_path) == 2
+    (tmp_path / "gentle-breeze-7").mkdir()
+    assert rn.next_global_run_suffix(tmp_path) == 8
+
+
 def test_next_index_for_adjective_noun(tmp_path: Path):
     (tmp_path / "swift-river-1").mkdir()
     (tmp_path / "swift-river-3").mkdir()
