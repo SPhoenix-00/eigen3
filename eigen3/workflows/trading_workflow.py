@@ -188,6 +188,7 @@ class TradingWorkflowConfig:
     replay_buffer_size: int = 100000
     warmup_steps: int = 1000
     eval_episodes: int = 5
+    conservative_k: int = 3
     target_update_period: int = 10
     steps_per_agent: int = 100
     gradient_vmap_chunk_size: Optional[int] = None
@@ -482,12 +483,18 @@ class TradingERLWorkflow:
         stacked_params: TradingNetworkParams,
         key: chex.PRNGKey,
     ) -> chex.Array:
-        """Evaluate all agents in parallel; returns fitness ``[pop_size]``."""
-        pop_size = self._pop_size
-        max_steps = getattr(self.eval_env, "episode_length", 1000) + 10
-        total_rewards = jnp.zeros(pop_size)
+        """Evaluate all agents in parallel; returns pessimistic fitness ``[pop_size]``.
 
-        for ep in range(self.config.eval_episodes):
+        Runs ``eval_episodes`` episodes per agent, then averages the
+        ``conservative_k`` lowest-reward episodes for each agent.  This
+        penalises lucky spikes and rewards consistency.
+        """
+        pop_size = self._pop_size
+        n_episodes = self.config.eval_episodes
+        max_steps = getattr(self.eval_env, "episode_length", 1000) + 10
+        all_ep_rewards: list[chex.Array] = []
+
+        for ep in range(n_episodes):
             key, ep_key = random.split(key)
             reset_keys = random.split(ep_key, pop_size)
             env_states = self._vmap_eval_reset(reset_keys)
@@ -510,13 +517,14 @@ class TradingERLWorkflow:
                 done_mask = done_mask | next_states.done
                 env_states = next_states
 
-                # Do not `bool(jnp.all(done_mask))` here: it syncs host every step and
-                # tanks utilization; nvidia-smi then looks idle.  Extra steps after all
-                # envs are done are masked out in ep_rewards (see jnp.where above).
+            all_ep_rewards.append(ep_rewards)
 
-            total_rewards = total_rewards + ep_rewards
+        rewards_matrix = jnp.stack(all_ep_rewards, axis=0)  # [n_episodes, pop_size]
 
-        return total_rewards / self.config.eval_episodes
+        k = min(self.config.conservative_k, n_episodes)
+        sorted_rewards = jnp.sort(rewards_matrix, axis=0)  # ascending per agent
+        bottom_k = sorted_rewards[:k, :]  # lowest k episodes per agent
+        return jnp.mean(bottom_k, axis=0)
 
     # ------------------------------------------------------------------
     # Phase 4 — Genetic operators

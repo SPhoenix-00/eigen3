@@ -592,6 +592,7 @@ def build_trading_workflow_config(cfg: DictConfig) -> TradingWorkflowConfig:
         batch_size=_effective_workflow_batch_size(cfg),
         replay_buffer_size=_effective_replay_buffer_size(cfg),
         eval_episodes=int(OmegaConf.select(cfg, "population.eval_episodes", default=5)),
+        conservative_k=int(OmegaConf.select(cfg, "population.conservative_k", default=3)),
         target_update_period=target_update_period,
         steps_per_agent=steps_per_agent,
         gradient_vmap_chunk_size=_effective_gradient_vmap_chunk_size(cfg),

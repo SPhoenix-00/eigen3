@@ -69,7 +69,7 @@ local_training_agent_batch_size: 8    # Single-GPU: agents per loss vmap chunk (
 
 # ---------- Evaluation ----------
 eval_episodes: 5                      # Eigen2 EVAL_EPISODES — episodes per agent per evaluation
-conservative_k: 2                     # Average of K worst episodes for pessimistic fitness
+conservative_k: 3                     # Average of K worst episodes for pessimistic fitness
 eval_interval: 50                     # Validate best agent every N generations
 eval_num_workers: 48                  # Eigen2 EVAL_NUM_WORKERS (actual = min(cpu_count-1, this))
 skip_reevaluation_on_resume: true     # Skip re-eval on resume unless reward function changed
