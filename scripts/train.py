@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 from pathlib import Path
 import logging
+from typing import Optional
 
 from eigen3.data import load_trading_data, create_synthetic_data
 from eigen3.data.splits import compute_train_val_holdout_split, slice_trading_timeline
@@ -20,6 +21,71 @@ from eigen3.config import (
 from eigen3.environment.trading_env import TradingEnv
 
 logger = logging.getLogger(__name__)
+
+
+def _short_class(path: Optional[str]) -> str:
+    if not path:
+        return "?"
+    s = str(path)
+    return s.rsplit(".", maxsplit=1)[-1]
+
+
+def _run_config_summary(cfg: DictConfig) -> str:
+    """Compact, human-readable startup summary (full YAML stays at DEBUG)."""
+
+    def S(key: str, default=None):
+        return OmegaConf.select(cfg, key, default=default)
+
+    lines: list[str] = [
+        "",
+        "──────── Run ────────",
+        f"  experiment: {S('experiment_name', '?')!s}   run: {S('run_name', '?')!s}",
+        f"  seed: {S('seed', '?')!s}   device: {S('device', '?')!s}   "
+        f"jit: {S('enable_jit', True)!s}   pmap: {S('enable_pmap', False)!s}",
+    ]
+    try:
+        from hydra.core.hydra_config import HydraConfig
+
+        out = HydraConfig.get().runtime.output_dir
+        lines.append(f"  hydra output: {out}")
+    except Exception:
+        pass
+
+    lines.extend(
+        [
+            "──────── Env ────────",
+            f"  data_path: {S('env.data_path', '?')!s}",
+            f"  context: {S('env.context_window_days', '?')!s} d   "
+            f"trading: {S('env.trading_period_days', '?')!s} d   "
+            f"settlement: {S('env.settlement_period_days', 0)!s} d",
+            f"  val_reserve: ×{S('env.validation_reserve_multiplier', '?')!s}   "
+            f"columns: {S('env.num_columns', '?')!s}   "
+            f"F_obs: {S('env.num_features_obs', '?')!s}   "
+            f"investable: {S('env.num_investable_stocks', '?')!s}",
+            "──────── Agent ───────",
+            f"  workflow: {_short_class(S('agent.workflow_cls'))}",
+            f"  actor_lr: {S('agent.optimizer.actor_lr', '?')!s}   "
+            f"critic_lr: {S('agent.optimizer.critic_lr', '?')!s}   "
+            f"mixed_precision: {S('agent.use_mixed_precision', False)!s}",
+            "──────── Population ─",
+            f"  pop_size: {S('population.pop_size', '?')!s}   "
+            f"generations: {S('population.total_generations', '?')!s}   "
+            f"batch: {S('population.batch_size', '?')!s}",
+            f"  replay: {S('population.replay_buffer_size', '?')!s}   "
+            f"grad_steps/gen: {S('population.gradient_steps_per_gen', '?')!s}   "
+            f"eval_episodes: {S('population.eval_episodes', '?')!s}",
+            f"  gauntlet: {S('population.gauntlet_enabled', '?')!s}",
+            "──────── Logging ─────",
+            f"  console: {S('logging.console_log_level', 'INFO')!s}   "
+            f"tensorboard: {S('logging.use_tensorboard', False)!s}   "
+            f"wandb: {S('logging.wandb_project', '?')!s} "
+            f"({S('logging.wandb_mode', '?')!s})",
+            "──────────────────────",
+            "  Full config: Hydra run dir → .hydra/config.yaml (+ overrides.yaml).",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _build_networks(cfg: DictConfig):
@@ -67,10 +133,10 @@ def _build_networks(cfg: DictConfig):
 def main(cfg: DictConfig) -> None:
     """Main training function: load data, create env, then run EvoRL workflow when integrated."""
 
-    logger.info("Configuration:")
-    logger.info(OmegaConf.to_yaml(cfg))
+    logger.info(_run_config_summary(cfg))
+    logger.debug("Full resolved configuration:\n%s", OmegaConf.to_yaml(cfg, resolve=True))
 
-    logger.info(f"Setting random seed: {cfg.seed}")
+    logger.info("Setting random seed: %s", cfg.seed)
     key = jax.random.PRNGKey(cfg.seed)
 
     data_path = OmegaConf.select(cfg, "env.data_path", default="data/raw")
@@ -204,20 +270,6 @@ def main(cfg: DictConfig) -> None:
         del agent_state
     except Exception as e:
         logger.warning(f"TradingAgent init skipped or failed: {e}")
-
-    # Log population/ERL sizing summary so the operator can sanity-check
-    pop_cfg = OmegaConf.select(cfg, "population", default={})
-    if pop_cfg:
-        logger.info(
-            "Population config: pop_size=%s, elite_frac=%s, "
-            "replay_buffer=%s, batch=%s, grad_steps/gen=%s, eval_episodes=%s",
-            OmegaConf.select(cfg, "population.pop_size", default="?"),
-            OmegaConf.select(cfg, "population.elite_frac", default="?"),
-            OmegaConf.select(cfg, "population.replay_buffer_size", default="?"),
-            OmegaConf.select(cfg, "population.batch_size", default="?"),
-            OmegaConf.select(cfg, "population.gradient_steps_per_gen", default="?"),
-            OmegaConf.select(cfg, "population.eval_episodes", default="?"),
-        )
 
     # ---- Hall of Fame ----
     from eigen3.erl.cloud_sync import CloudSync
