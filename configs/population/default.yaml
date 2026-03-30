@@ -114,6 +114,11 @@ stabilization_ghost_detection: false  # Abort if fitness drops below baseline
 gauntlet_num_slices: 20               # Eigen2 GAUNTLET_NUM_SLICES (vs 7 for normal)
 
 
+# ---------- Compat checkpoints (best_agent.msgpack + evaluation_results bundle) ----------
+# HoF (local + GCS) and metrics_history.jsonl are unaffected.
+save_checkpoints: false
+
+
 # ---------- Hall of Fame ----------
 # Persistent archive of the best agents across all generations.
 # Syncs to GCS when CLOUD_PROVIDER=gcs and CLOUD_BUCKET are set.

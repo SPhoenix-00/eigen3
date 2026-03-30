@@ -469,6 +469,7 @@ def run_config_summary(cfg: DictConfig) -> str:
             f"  steps_per_agent/gen: {S('population.steps_per_agent', '?')!s}",
             f"  loss_vmap_chunk: {_effective_gradient_vmap_chunk_size(cfg) or 'full'}",
             f"  gauntlet: {S('population.gauntlet_enabled', '?')!s}",
+            f"  save_checkpoints: {S('population.save_checkpoints', True)!s}",
             "-------- Logging -----",
             f"  console: {S('logging.console_log_level', 'INFO')!s}   "
             f"tensorboard: {S('logging.use_tensorboard', False)!s}   "
@@ -817,6 +818,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         log_gpu_memory_report(logger, "workflow initialized (replay + compiled graphs warm)")
 
     num_gen = int(OmegaConf.select(cfg, "population.total_generations", default=100))
+    save_checkpoints = bool(OmegaConf.select(cfg, "population.save_checkpoints", default=True))
     logger.info("Running %d generations (TradingERLWorkflow)...", num_gen)
     if compat_mode:
         _phase_log("Phase 4: Training Loop")
@@ -853,36 +855,44 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
                 if score > best_score:
                     best_score = score
                     best_params = best_params_for_progress
-                    logger.info(
-                        "New best (gen=%s); saving checkpoint and artifact eval...",
-                        metrics.get("generation", gen + 1),
-                    )
-                    best_path = artifact_mgr.save_best_agent(
-                        best_params,
-                        generation=int(metrics.get("generation", gen + 1)),
-                        score=score,
-                    )
-                    _art_eps = min(
-                        3, int(OmegaConf.select(cfg, "population.eval_episodes", default=5))
-                    )
-                    logger.info("Artifact validation rollouts (%d episode(s))...", _art_eps)
-                    eval_payload = _evaluate_agent_on_env(
-                        env=val_env,
-                        agent=agent,
-                        params=best_params,
-                        seed=int(cfg.seed) + gen + 1000,
-                        num_episodes=_art_eps,
-                    )
-                    eval_payload["run_name"] = run_name
-                    eval_payload["generation"] = int(metrics.get("generation", gen + 1))
-                    eval_paths = artifact_mgr.write_evaluation_bundle(eval_payload)
-                    logger.info(
-                        "New best (gen=%s score=%.6f) saved to %s | eval: %s",
-                        metrics.get("generation", gen + 1),
-                        score,
-                        best_path,
-                        eval_paths["json"],
-                    )
+                    if save_checkpoints:
+                        logger.info(
+                            "New best (gen=%s); saving checkpoint and artifact eval...",
+                            metrics.get("generation", gen + 1),
+                        )
+                        best_path = artifact_mgr.save_best_agent(
+                            best_params,
+                            generation=int(metrics.get("generation", gen + 1)),
+                            score=score,
+                        )
+                        _art_eps = min(
+                            3, int(OmegaConf.select(cfg, "population.eval_episodes", default=5))
+                        )
+                        logger.info("Artifact validation rollouts (%d episode(s))...", _art_eps)
+                        eval_payload = _evaluate_agent_on_env(
+                            env=val_env,
+                            agent=agent,
+                            params=best_params,
+                            seed=int(cfg.seed) + gen + 1000,
+                            num_episodes=_art_eps,
+                        )
+                        eval_payload["run_name"] = run_name
+                        eval_payload["generation"] = int(metrics.get("generation", gen + 1))
+                        eval_paths = artifact_mgr.write_evaluation_bundle(eval_payload)
+                        logger.info(
+                            "New best (gen=%s score=%.6f) saved to %s | eval: %s",
+                            metrics.get("generation", gen + 1),
+                            score,
+                            best_path,
+                            eval_paths["json"],
+                        )
+                    else:
+                        logger.info(
+                            "New best (gen=%s score=%.6f); checkpoint save skipped "
+                            "(population.save_checkpoints=false)",
+                            metrics.get("generation", gen + 1),
+                            score,
+                        )
 
         last = all_metrics[-1] if all_metrics else {}
         logger.info(
