@@ -10,6 +10,11 @@
 # ============================================================================
 
 
+# ---------- Run naming (Wandb-style: adjective-noun-N under checkpoints/) ----------
+# When true (default), ``run_name`` is generated as e.g. ``cosmic-thunder-1``.
+# Set false to use top-level ``run_name`` from config (e.g. Hydra ``${now:...}``).
+wandb_style_run_name: true
+
 # ---------- Population ----------
 pop_size: 48                          # Eigen2 POPULATION_SIZE (96 distributed, 48 local)
 local_pop_size: 48                    # Eigen2 LOCAL_POPULATION_SIZE

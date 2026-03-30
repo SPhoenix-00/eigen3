@@ -80,13 +80,18 @@ class CloudSync:
                 self.bucket = self.client.bucket(self.bucket_name)
                 logger.info("Connected to GCS bucket: %s", self.bucket_name)
             except ImportError:
-                logger.warning(
-                    "google-cloud-storage not installed — falling back to local. "
-                    "pip install google-cloud-storage"
+                logger.error(
+                    "CLOUD SYNC DISABLED: package missing. "
+                    "Install google-cloud-storage to enable GCS uploads. "
+                    "(Training and local HoF files are unaffected.)"
                 )
                 self.provider = "local"
             except Exception as exc:
-                logger.warning("GCS connection failed (%s) — falling back to local", exc)
+                logger.error(
+                    "CLOUD SYNC DISABLED: GCS client or bucket init failed (%s). "
+                    "Falling back to local-only; training continues.",
+                    exc,
+                )
                 self.provider = "local"
 
     @classmethod
@@ -100,7 +105,17 @@ class CloudSync:
             if default_key.is_file():
                 creds = str(default_key)
         if provider not in ("gcs", "local"):
-            logger.warning("Unsupported CLOUD_PROVIDER=%s, using local", provider)
+            logger.error(
+                "CLOUD SYNC DISABLED: unsupported CLOUD_PROVIDER=%r (use gcs or local). "
+                "Using local-only.",
+                provider,
+            )
+            provider = "local"
+        if provider == "gcs" and not bucket:
+            logger.error(
+                "CLOUD SYNC DISABLED: CLOUD_PROVIDER=gcs but CLOUD_BUCKET is unset. "
+                "HoF uploads are off; set CLOUD_BUCKET to enable."
+            )
             provider = "local"
         return cls(
             provider=provider,  # type: ignore[arg-type]
@@ -134,7 +149,13 @@ class CloudSync:
             try:
                 self._executor.submit(self._upload, local_path, cloud_path)
             except RuntimeError as exc:
-                logger.warning("Cloud upload not scheduled (executor stopped?): %s", exc)
+                logger.error(
+                    "CLOUD UPLOAD FAILED TO SCHEDULE (training continues). "
+                    "local=%s gcs=%s error=%s",
+                    local_path,
+                    cloud_path,
+                    exc,
+                )
             return True
         return self._upload(local_path, cloud_path)
 
@@ -150,7 +171,12 @@ class CloudSync:
             blob.upload_from_filename(local_path)
             return True
         except Exception as exc:
-            logger.warning("Upload failed %s -> %s: %s", local_path, cloud_path, exc)
+            logger.error(
+                "CLOUD UPLOAD FAILED (training continues). local=%s gcs=%s error=%s",
+                local_path,
+                cloud_path,
+                exc,
+            )
             return False
 
     def upload_file_verified(self, local_path: str, cloud_path: str) -> bool:
@@ -180,14 +206,21 @@ class CloudSync:
                     hashlib.md5(f.read()).digest()
                 ).decode()
             if remote_md5 != local_md5:
-                logger.warning(
-                    "Verified upload MD5 mismatch for %s (local=%s remote=%s)",
-                    cloud_path, local_md5, remote_md5,
+                logger.error(
+                    "CLOUD UPLOAD VERIFICATION FAILED (MD5 mismatch; training continues). "
+                    "gcs=%s local_md5_b64=%s remote_md5_b64=%s",
+                    cloud_path,
+                    local_md5,
+                    remote_md5,
                 )
                 return False
             return True
         except Exception as exc:
-            logger.warning("Verification failed for %s: %s", cloud_path, exc)
+            logger.error(
+                "CLOUD UPLOAD VERIFICATION FAILED (training continues). gcs=%s error=%s",
+                cloud_path,
+                exc,
+            )
             return False
 
     def download_file(
@@ -205,7 +238,11 @@ class CloudSync:
             return True
         except Exception as exc:
             if not silent:
-                logger.warning("Download failed %s: %s", cloud_path, exc)
+                logger.error(
+                    "CLOUD DOWNLOAD FAILED (training continues). gcs=%s error=%s",
+                    cloud_path,
+                    exc,
+                )
             return False
 
     def file_exists(self, cloud_path: str) -> bool:
@@ -225,7 +262,11 @@ class CloudSync:
                 blob.delete()
             return True
         except Exception as exc:
-            logger.warning("Delete failed %s: %s", cloud_path, exc)
+            logger.error(
+                "CLOUD DELETE FAILED (training continues). gcs=%s error=%s",
+                cloud_path,
+                exc,
+            )
             return False
 
     # ------------------------------------------------------------------

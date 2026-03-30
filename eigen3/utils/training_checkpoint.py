@@ -19,7 +19,11 @@ import numpy as np
 
 from eigen3.agents.trading_agent import TradingNetworkParams
 from eigen3.environment.trading_env import EnvState, TradingEnvState
-from eigen3.workflows.trading_workflow import ReplayBufferState, TradingERLWorkflow
+from eigen3.workflows.trading_workflow import (
+    ReplayBufferState,
+    TradingERLWorkflow,
+    create_replay_buffer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +146,17 @@ def _env_states_from_checkpoint(d: Mapping[str, Any]) -> EnvState:
     )
 
 
+def fresh_replay_buffer_for_workflow(workflow: TradingERLWorkflow) -> ReplayBufferState:
+    """Empty replay buffer matching *workflow* env shapes and configured capacity."""
+    obs_shape = tuple(int(x) for x in workflow.env.obs_space.shape)
+    action_shape = tuple(int(x) for x in workflow.env.action_space.shape)
+    return create_replay_buffer(
+        int(workflow.config.replay_buffer_size),
+        obs_shape,
+        action_shape,
+    )
+
+
 def _validate_meta(meta: Mapping[str, Any], workflow: TradingERLWorkflow) -> None:
     if int(meta.get("version", 0)) != CHECKPOINT_VERSION:
         raise ValueError(
@@ -216,8 +231,19 @@ def save_training_checkpoint(
     return path
 
 
-def load_training_checkpoint(path: Path, workflow: TradingERLWorkflow) -> dict[str, Any]:
-    """Load checkpoint into *workflow* (mutates RNG, params, buffer, env states)."""
+def load_training_checkpoint(
+    path: Path,
+    workflow: TradingERLWorkflow,
+    *,
+    restore_replay_buffer: bool = False,
+) -> dict[str, Any]:
+    """Load checkpoint into *workflow* (RNG, params, env states; replay optional).
+
+    For ``--resume``, pass ``restore_replay_buffer=False`` (default): the replay
+    buffer is **not** restored from disk; an empty buffer is allocated and refilled
+    from on-device rollouts. Checkpoint files may still contain a saved buffer for
+    local crash recovery if you call with ``restore_replay_buffer=True``.
+    """
     blob = pickle.loads(path.read_bytes())
     meta = blob["meta"]
     _validate_meta(meta, workflow)
@@ -226,7 +252,16 @@ def load_training_checkpoint(path: Path, workflow: TradingERLWorkflow) -> dict[s
     workflow.total_env_steps = int(meta["total_env_steps"])
     workflow.key = jnp.asarray(blob["rng_key"])
     workflow._stacked_params = stacked_params_from_checkpoint(blob["stacked_params"])
-    workflow._replay_buffer = _replay_from_checkpoint(blob["replay_buffer"])
+    if restore_replay_buffer:
+        workflow._replay_buffer = _replay_from_checkpoint(blob["replay_buffer"])
+        logger.info("Resumed replay buffer from checkpoint.")
+    else:
+        workflow._replay_buffer = fresh_replay_buffer_for_workflow(workflow)
+        logger.info(
+            "Resume: replay buffer not loaded from checkpoint — starting empty "
+            "(capacity=%s); refilling from training rollouts.",
+            workflow.config.replay_buffer_size,
+        )
     workflow._env_states = _env_states_from_checkpoint(blob["env_states"])
     workflow._last_best_idx = blob.get("last_best_idx")
     workflow._printed_train_compile_hint = bool(blob.get("printed_train_compile_hint", True))

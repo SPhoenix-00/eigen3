@@ -22,9 +22,9 @@ checkpoint_dir: checkpoints
 log_dir: logs
 data_dir: data
 
-# Experiment tracking
+# Experiment tracking (overridden at runtime when population.wandb_style_run_name=true)
 experiment_name: eigen3_trading
-run_name: ${now:%Y-%m-%d_%H-%M-%S}
+run_name: eigen3_run
 
 # Enable JIT compilation
 enable_jit: true

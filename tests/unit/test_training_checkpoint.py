@@ -1,5 +1,7 @@
 """Unit tests for training-state serialisation helpers."""
 
+from unittest.mock import MagicMock
+
 import jax.numpy as jnp
 
 import eigen3.utils.training_checkpoint as tc
@@ -22,6 +24,16 @@ def test_replay_buffer_roundtrip():
     assert int(buf2.size) == 3
     assert int(buf2.insert_idx) == 7
     assert buf2.obs.shape == buf.obs.shape
+
+
+def test_fresh_replay_buffer_for_workflow():
+    wf = MagicMock()
+    wf.env.obs_space.shape = (5, 2, 1)
+    wf.env.action_space.shape = (3, 2)
+    wf.config.replay_buffer_size = 128
+    buf = tc.fresh_replay_buffer_for_workflow(wf)
+    assert int(buf.size) == 0
+    assert buf.obs.shape == (128, 5, 2, 1)
 
 
 def test_stacked_params_roundtrip():

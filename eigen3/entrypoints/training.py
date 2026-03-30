@@ -676,6 +676,53 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         logger.info("Mirroring console to %s", tee_active)
     if compat_mode:
         _phase_log("Phase 0: Startup")
+
+    artifact_root = Path(
+        os.environ.get(
+            "EIGEN3_ARTIFACT_ROOT",
+            str(Path(hydra.utils.to_absolute_path("."))),
+        )
+    )
+    default_checkpoint_root = Path(
+        os.environ.get("EIGEN3_CHECKPOINT_ROOT", str(artifact_root / "checkpoints"))
+    )
+    cloud_project = OmegaConf.select(cfg, "population.cloud_project_name", default="eigen3")
+
+    from eigen3.erl.cloud_sync import CloudSync
+
+    cloud_sync = CloudSync.from_env(project_name=cloud_project)
+    resume_dir: Optional[Path] = None
+    _rdir = _resolve_resume_run_dir(cfg, artifact_root)
+    if _rdir is not None:
+        resume_dir = _rdir.resolve()
+
+    if resume_dir is not None:
+        run_name = resume_dir.name
+    else:
+        wandb_style = bool(
+            OmegaConf.select(cfg, "population.wandb_style_run_name", default=True)
+        )
+        if wandb_style:
+            from eigen3.utils.run_naming import generate_wandb_style_run_name
+
+            default_checkpoint_root.mkdir(parents=True, exist_ok=True)
+            run_name = generate_wandb_style_run_name(default_checkpoint_root)
+        else:
+            run_name = str(OmegaConf.select(cfg, "run_name", default="run"))
+
+    try:
+        from omegaconf import open_dict
+
+        with open_dict(cfg):
+            cfg.run_name = run_name
+    except Exception:
+        pass
+
+    hof_cloud_prefix = f"{cloud_project}/{run_name}/hall_of_fame"
+    ck_banner_path = str(resume_dir) if resume_dir is not None else str(
+        default_checkpoint_root / run_name
+    )
+
     logger.info(run_config_summary(cfg))
     logger.debug("Full resolved configuration:\n%s", OmegaConf.to_yaml(cfg, resolve=True))
 
@@ -687,6 +734,22 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         "JAX: default_backend=%s devices=%s",
         jax.default_backend(),
         [str(d) for d in jax.devices()],
+    )
+
+    from eigen3.utils.terminal_banner import print_training_identity_banner
+
+    print_training_identity_banner(
+        run_name=run_name,
+        cloud_sync=cloud_sync,
+        cloud_prefix=hof_cloud_prefix,
+        checkpoint_dir=ck_banner_path,
+        resume=resume_dir is not None,
+    )
+    logger.info(
+        "Training identity: run_name=%s cloud_provider=%s resume=%s",
+        run_name,
+        cloud_sync.provider,
+        resume_dir is not None,
     )
 
     if compat_mode:
@@ -837,33 +900,17 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         _phase_log("Phase 3: Workflow Initialization")
     logger.info("TradingAgent init OK; starting TradingERLWorkflow.")
 
-    from eigen3.erl.cloud_sync import CloudSync
     from eigen3.erl.hall_of_fame import HallOfFame
 
     hof_capacity = int(OmegaConf.select(cfg, "population.hof_capacity", default=10))
-    cloud_project = OmegaConf.select(cfg, "population.cloud_project_name", default="eigen3")
-    cloud_sync = CloudSync.from_env(project_name=cloud_project)
 
     run_id = os.environ.get("EIGEN3_RUN_STAMP", datetime.now().strftime("%Y%m%d_%H%M%S"))
-    artifact_root = Path(
-        os.environ.get(
-            "EIGEN3_ARTIFACT_ROOT",
-            str(Path(hydra.utils.to_absolute_path("."))),
-        )
-    )
     eval_dir = Path(os.environ.get("EIGEN3_EVAL_DIR", str(artifact_root / "evaluation_results")))
-    default_checkpoint_root = Path(
-        os.environ.get("EIGEN3_CHECKPOINT_ROOT", str(artifact_root / "checkpoints"))
-    )
-    resume_run_dir = _resolve_resume_run_dir(cfg, artifact_root)
-    if resume_run_dir is not None:
-        resume_run_dir = resume_run_dir.resolve()
-        checkpoint_root = resume_run_dir.parent
-        run_name = resume_run_dir.name
-        run_checkpoint_dir = resume_run_dir
+    if resume_dir is not None:
+        checkpoint_root = resume_dir.parent
+        run_checkpoint_dir = resume_dir
     else:
         checkpoint_root = default_checkpoint_root
-        run_name = str(OmegaConf.select(cfg, "run_name", default="run"))
         run_checkpoint_dir = checkpoint_root / run_name if compat_mode else Path(
             hydra.utils.to_absolute_path("checkpoints")
         )
@@ -888,11 +935,23 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         cloud_prefix=f"{cloud_project}/{run_name}/hall_of_fame",
     )
     hof.load()
+    if cloud_sync.provider == "local":
+        logger.info(
+            "Cloud sync: DISABLED (local-only). HoF data stays under %s; nothing is uploaded. "
+            "To enable GCS: set CLOUD_PROVIDER=gcs, CLOUD_BUCKET, and credentials "
+            "(or repo-root gcs-credentials.json).",
+            checkpoint_dir,
+        )
+    else:
+        logger.info(
+            "Cloud sync: ENABLED (Google Cloud Storage). bucket=%r HoF prefix=%r",
+            cloud_sync.bucket_name,
+            hof.cloud_prefix,
+        )
     logger.info(
-        "HoF ready: capacity=%d, loaded=%d, cloud=%s",
+        "HoF ready: capacity=%d, loaded=%d entries",
         hof.capacity,
         len(hof),
-        cloud_sync.provider,
     )
 
     wf_cfg = build_trading_workflow_config(cfg)
@@ -921,7 +980,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
 
     start_gen = 0
     best_score = float("-inf")
-    if resume_run_dir is not None:
+    if resume_dir is not None:
         ckpt_file = training_state_path(checkpoint_dir)
         if not ckpt_file.is_file():
             raise FileNotFoundError(
@@ -931,7 +990,9 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
             )
         if compat_mode:
             _phase_log("Phase 3b: Resume")
-        ck_info = load_training_checkpoint(ckpt_file, workflow)
+        ck_info = load_training_checkpoint(
+            ckpt_file, workflow, restore_replay_buffer=False
+        )
         best_score = float(ck_info["best_score"])
         meta_seed = int(ck_info["meta"].get("seed", int(cfg.seed)))
         if meta_seed != int(cfg.seed):
