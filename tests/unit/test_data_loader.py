@@ -249,8 +249,8 @@ class TestTrainValSplit:
         assert sp is not None
         assert sp.train_end + sp.val_rows + sp.holdout_rows == n
         assert loader.train_data_obs.shape[0] == sp.train_end
-        assert loader.val_data_obs.shape[0] == sp.val_rows
-        assert loader.holdout_data_obs.shape[0] == sp.holdout_rows
+        assert loader.val_data_obs.shape[0] == sp.val_env_rows
+        assert loader.holdout_data_obs.shape[0] == sp.holdout_env_rows
 
     def test_validation_reserve_multiplier(self):
         """Larger multiplier widens the validation band."""
@@ -281,10 +281,10 @@ class TestTrainValSplit:
         sp = loader.split_info
         assert np.array_equal(loader.train_data_obs, data_obs[: sp.train_end])
         assert np.array_equal(
-            loader.val_data_obs, data_obs[sp.val_start : sp.val_end]
+            loader.val_data_obs, data_obs[sp.val_env_start : sp.val_end]
         )
         assert np.array_equal(
-            loader.holdout_data_obs, data_obs[sp.holdout_start : sp.holdout_end]
+            loader.holdout_data_obs, data_obs[sp.holdout_env_start : sp.holdout_end]
         )
 
 
@@ -339,9 +339,9 @@ class TestJAXConversion:
         # Get JAX arrays
         jax_obs, jax_full, norm_stats = loader.get_val_data()
 
-        vr = loader.split_info.val_rows
-        assert jax_obs.shape == (vr, 100, 5)
-        assert jax_full.shape == (vr, 100, 9)
+        ver = loader.split_info.val_env_rows
+        assert jax_obs.shape == (ver, 100, 5)
+        assert jax_full.shape == (ver, 100, 9)
 
     def test_get_holdout_data(self):
         """Holdout tail is exposed for final evaluation only."""
@@ -358,7 +358,7 @@ class TestJAXConversion:
         loader = StockDataLoader(config)
         loader.load_from_numpy(data_obs, data_full)
         ho_obs, ho_full, _ = loader.get_holdout_data()
-        assert ho_obs.shape[0] == loader.split_info.holdout_rows
+        assert ho_obs.shape[0] == loader.split_info.holdout_env_rows
 
     def test_get_all_data(self):
         """Test getting all data as JAX arrays"""
@@ -584,7 +584,7 @@ class TestLargeScale:
         assert train_full.shape == (sp.train_end, 669, 9)
 
         val_obs, val_full, _ = loader.get_val_data()
-        assert val_obs.shape == (sp.val_rows, 669, 5)
+        assert val_obs.shape == (sp.val_env_rows, 669, 5)
 
 
 if __name__ == "__main__":

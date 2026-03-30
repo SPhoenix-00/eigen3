@@ -129,16 +129,19 @@ def main(cfg: DictConfig) -> None:
     )
     logger.info(
         f"Split: train rows [0, {split.train_end}), "
-        f"val rows [{split.val_start}, {split.val_end}), "
-        f"holdout rows [{split.holdout_start}, {split.holdout_end}) "
-        f"(final episode start index on full series: {split.last_episode_start})"
+        f"val trading band [{split.val_start}, {split.val_end}), "
+        f"val env rows [{split.val_env_start}, {split.val_end}) "
+        f"(context may use [{split.val_env_start}, {split.val_start})), "
+        f"holdout trading [{split.holdout_start}, {split.holdout_end}), "
+        f"holdout env [{split.holdout_env_start}, {split.holdout_end}) "
+        f"(final episode start index: {split.last_episode_start})"
     )
 
     train_obs, train_full, dates_train = slice_trading_timeline(
         data_array, data_array_full, dates_np, 0, split.train_end
     )
     val_obs, val_full, dates_val = slice_trading_timeline(
-        data_array, data_array_full, dates_np, split.val_start, split.val_end
+        data_array, data_array_full, dates_np, split.val_env_start, split.val_end
     )
 
     logger.info("Creating trading environments (train + validation; holdout excluded)...")

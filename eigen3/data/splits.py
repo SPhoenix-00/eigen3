@@ -1,11 +1,16 @@
 """Train / validation / holdout time ranges for trading data.
 
-Holdout is the contiguous tail of rows consumed by the **last** valid calendar
-episode (same rules as :class:`eigen3.environment.trading_env.TradingEnv`).
-Validation is a fixed-width row window of ``ceil(multiplier * episode_trading_rows)``
-rows immediately before that holdout; training uses everything before the
-validation window. Episode starts within the validation slice are chosen at
-random by the environment ``reset``.
+**Logical bands (disjoint):** training ``[0, val_start)``, validation trading
+``[val_start, val_end)``, holdout trading ``[holdout_start, num_days)`` with
+``val_end == holdout_start == last_episode_start`` (first row of the final
+episode). Validation is ``ceil(multiplier * episode_trading_rows)`` rows wide.
+
+**Env array slices:** Observation context may extend **before** the logical
+validation or holdout trading windows. :attr:`val_env_start` and
+:attr:`holdout_env_start` are the first row indices passed to
+:class:`~eigen3.environment.trading_env.TradingEnv` for validation and holdout
+(typically ``max(0, band_start - context_window_days)``). Feasibility checks
+only require trading+settlement rows to lie inside each logical band.
 """
 
 from __future__ import annotations
@@ -21,14 +26,22 @@ from eigen3.environment.trading_env import TradingEnv
 
 @dataclass(frozen=True)
 class TrainValHoldoutSplit:
-    """Index bounds on the full timeline (0-based, end-exclusive)."""
+    """Index bounds on the full timeline (0-based, end-exclusive).
+
+    ``val_start`` / ``val_end`` delimit validation **trading and liquidation**;
+    ``holdout_start`` / ``holdout_end`` delimit holdout **trading and liquidation**
+    (``holdout_start`` equals ``last_episode_start``). ``val_env_start`` and
+    ``holdout_env_start`` include preceding rows for observation context only.
+    """
 
     num_days: int
     train_end: int
     val_start: int
     val_end: int
+    val_env_start: int
     holdout_start: int
     holdout_end: int
+    holdout_env_start: int
     last_episode_start: int
     last_episode_end_step: int
     validation_reserve_rows: int
@@ -43,8 +56,18 @@ class TrainValHoldoutSplit:
         return self.val_end - self.val_start
 
     @property
+    def val_env_rows(self) -> int:
+        return self.val_end - self.val_env_start
+
+    @property
     def holdout_rows(self) -> int:
+        """Rows in the holdout **trading** tail ``[holdout_start, holdout_end)``."""
+
         return self.holdout_end - self.holdout_start
+
+    @property
+    def holdout_env_rows(self) -> int:
+        return self.holdout_end - self.holdout_env_start
 
 
 def compute_train_val_holdout_split(
@@ -57,16 +80,17 @@ def compute_train_val_holdout_split(
 ) -> TrainValHoldoutSplit:
     """Compute train / validation / holdout row indices.
 
-    * **Holdout** — rows ``[holdout_start, num_days)`` are only used for the
-      final episode that ends at the end of the dataset (last valid start in
-      :meth:`TradingEnv._build_calendar_episode_schedule`). They must not be
-      used for training or validation.
-    * **Validation** — rows ``[val_start, val_end)`` with
+    * **Holdout (trading)** — rows ``[holdout_start, num_days)`` with
+      ``holdout_start == last_episode_start`` (final episode trading and
+      liquidation only). Not used for training or validation.
+    * **Validation (trading)** — rows ``[val_start, val_end)`` with
       ``val_end == holdout_start`` and width
-      ``ceil(validation_reserve_multiplier * episode_trading_rows)``, where
-      ``episode_trading_rows`` is the trading row span of that last episode
-      (``last_episode_end_step - last_episode_start``).
-    * **Training** — rows ``[0, train_end)`` with ``train_end == val_start``.
+      ``ceil(validation_reserve_multiplier * episode_trading_rows)``.
+    * **Training** — ``[0, train_end)`` with ``train_end == val_start``.
+    * **Validation / holdout env arrays** — ``[val_env_start, val_end)`` and
+      ``[holdout_env_start, num_days)`` with env starts
+      ``max(0, band_start - context_window_days)`` so context may overlap
+      earlier splits.
 
     Args:
         num_days: Number of rows (``T``) in the panel.
@@ -104,9 +128,8 @@ def compute_train_val_holdout_split(
     cal_excl = int(np.asarray(cal_end_excl)[last_start])
     end_step = cal_excl + int(settlement_period_days)
 
-    holdout_start = last_start - int(context_window_days) + 1
-    if holdout_start < 0:
-        raise ValueError("holdout_start < 0; context_window_days too large for last episode")
+    holdout_start = last_start
+    holdout_env_start = max(0, last_start - int(context_window_days))
 
     episode_trading_rows = end_step - last_start
     if episode_trading_rows < 1:
@@ -115,16 +138,16 @@ def compute_train_val_holdout_split(
     validation_reserve_rows = int(
         math.ceil(float(validation_reserve_multiplier) * float(episode_trading_rows))
     )
-    val_end = holdout_start
+    val_end = last_start
     val_start = val_end - validation_reserve_rows
     if val_start < 0:
         raise ValueError(
             f"Not enough history for validation band ({validation_reserve_rows} rows) "
-            f"before holdout; need at least {validation_reserve_rows} rows prior to "
-            f"holdout_start={holdout_start}, got val_start={val_start}"
+            f"before final episode start index {val_end}; got val_start={val_start}"
         )
 
     train_end = val_start
+    val_env_start = max(0, val_start - int(context_window_days))
 
     # Training segment must admit at least one full episode (scheduler on prefix).
     _, train_valid, _ = TradingEnv._build_calendar_episode_schedule(
@@ -141,26 +164,29 @@ def compute_train_val_holdout_split(
             "increase data length or reduce validation/holdout footprint."
         )
 
-    # Validation segment must admit at least one valid start on its own timeline.
-    vlen = val_end - val_start
-    _, val_valid, _ = TradingEnv._build_calendar_episode_schedule(
-        num_days=vlen,
-        dates_ordinal=d[val_start:val_end],
-        episode_calendar_days=int(episode_calendar_days),
-        settlement_period_days=int(settlement_period_days),
-        context_window_days=int(context_window_days),
-        allow_empty=True,
-    )
-    if np.asarray(val_valid).size == 0:
+    # Validation: trading + settlement rows must fit in [val_start, val_end);
+    # observation context may use rows before val_start (included via val_env_start).
+    cal_end_np = np.asarray(cal_end_excl)
+    settle = int(settlement_period_days)
+    ok_val = False
+    for s in valid_np:
+        si = int(s)
+        ep_end = int(cal_end_np[si]) + settle
+        if si < val_start or ep_end > val_end:
+            continue
+        ok_val = True
+        break
+
+    if not ok_val:
+        vlen = val_end - val_start
         d_val = d[val_start:val_end]
         cal_span = int(d_val[-1] - d_val[0]) if vlen > 0 else 0
         raise ValueError(
-            f"Validation band [{val_start}, {val_end}) ({vlen} rows, ~{cal_span} calendar days "
-            f"from first to last row) has no valid episode starts for "
-            f"episode_calendar_days={episode_calendar_days} after "
-            f"context_window_days={context_window_days}. "
+            f"No global episode start has trading+settlement rows inside validation band "
+            f"[{val_start}, {val_end}) ({vlen} rows, ~{cal_span} calendar days "
+            f"from first to last row) for episode_calendar_days={episode_calendar_days}. "
             "Try: env.validation_reserve_multiplier=2.5 (or higher), "
-            "or reduce env.trading_period_days / env.context_window_days, "
+            "or reduce env.trading_period_days, "
             "or fix duplicate/flat dates in column A if rows are not one calendar day each."
         )
 
@@ -169,8 +195,10 @@ def compute_train_val_holdout_split(
         train_end=train_end,
         val_start=val_start,
         val_end=val_end,
+        val_env_start=val_env_start,
         holdout_start=holdout_start,
         holdout_end=num_days,
+        holdout_env_start=holdout_env_start,
         last_episode_start=last_start,
         last_episode_end_step=end_step,
         validation_reserve_rows=validation_reserve_rows,
@@ -202,8 +230,8 @@ def build_train_val_holdout_arrays(
     """Return train / val / holdout slices (JAX or NumPy arrays accepted)."""
     d = np.asarray(dates_ordinal)
     t0, t1 = split.train_end, split.val_start
-    v0, v1 = split.val_start, split.val_end
-    h0, h1 = split.holdout_start, split.holdout_end
+    v0, v1 = split.val_env_start, split.val_end
+    h0, h1 = split.holdout_env_start, split.holdout_end
     return {
         "train": slice_trading_timeline(data_array, data_array_full, d, 0, t0),
         "val": slice_trading_timeline(data_array, data_array_full, d, v0, v1),

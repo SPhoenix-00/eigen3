@@ -182,12 +182,17 @@ def main():
         validation_reserve_multiplier=args.validation_reserve_multiplier,
     )
     logger.info(
-        "Split: holdout rows [%d, %d) (%d rows)",
-        split.holdout_start, split.holdout_end, split.holdout_rows,
+        "Split: holdout trading [%d, %d) (%d rows), holdout env [%d, %d) (%d rows)",
+        split.holdout_start,
+        split.holdout_end,
+        split.holdout_rows,
+        split.holdout_env_start,
+        split.holdout_end,
+        split.holdout_env_rows,
     )
 
     holdout_obs, holdout_full, dates_holdout = slice_trading_timeline(
-        data_obs, data_full, dates_np, split.holdout_start, split.holdout_end,
+        data_obs, data_full, dates_np, split.holdout_env_start, split.holdout_end,
     )
 
     # --- Build environment ---

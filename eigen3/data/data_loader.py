@@ -312,20 +312,22 @@ class StockDataLoader:
             self.data_array_obs,
             self.data_array_full,
             self._dates_ordinal,
-            sp.val_start,
+            sp.val_env_start,
             sp.val_end,
         )
         self.holdout_data_obs, self.holdout_data_full, _ = slice_trading_timeline(
             self.data_array_obs,
             self.data_array_full,
             self._dates_ordinal,
-            sp.holdout_start,
+            sp.holdout_env_start,
             sp.holdout_end,
         )
 
         print(
-            f"Data split: train rows={sp.train_end}, val rows={sp.val_rows}, "
-            f"holdout rows={sp.holdout_rows} (last episode start={sp.last_episode_start})"
+            f"Data split: train rows={sp.train_end}, val trading rows={sp.val_rows}, "
+            f"val env rows={sp.val_env_rows}, holdout trading rows={sp.holdout_rows}, "
+            f"holdout env rows={sp.holdout_env_rows} "
+            f"(last episode start={sp.last_episode_start})"
         )
 
     def get_train_data(self) -> Tuple[jnp.ndarray, jnp.ndarray, Dict]:

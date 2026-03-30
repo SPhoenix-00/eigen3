@@ -29,6 +29,9 @@ def test_split_contiguous_1to1_calendar():
     assert s.train_end + s.val_rows + s.holdout_rows == n
     assert s.val_start == s.train_end
     assert s.val_end == s.holdout_start
+    assert s.holdout_start == s.last_episode_start
+    assert s.val_env_start == max(0, s.val_start - 20)
+    assert s.holdout_env_start == max(0, s.holdout_start - 20)
     assert s.validation_reserve_rows == int(np.ceil(1.5 * float(s.episode_trading_rows)))
 
 
