@@ -31,6 +31,7 @@ def _parse_cli(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
 
 
 def _set_compat_env(stamp: str, verbose: bool, quiet: bool) -> Path:
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
     eval_dir = _REPO_ROOT / "evaluation_results"
     ckpt_dir = _REPO_ROOT / "checkpoints"
     log_dir = _REPO_ROOT / "logs"

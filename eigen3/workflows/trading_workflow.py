@@ -672,6 +672,12 @@ class TradingERLWorkflow:
             "min_fitness": float(jnp.min(fitness_scores)),
             "std_fitness": float(jnp.std(fitness_scores)),
             "total_env_steps": self.total_env_steps,
+            "best_agent_idx": int(self._last_best_idx) if self._last_best_idx is not None else -1,
+            "best_agent_fitness": float(jnp.max(fitness_scores)),
+            "buffer_size": int(self._replay_buffer.size) if self._replay_buffer is not None else 0,
+            "buffer_capacity": int(self.config.replay_buffer_size),
+            "collect_reward_total": float(collect_reward),
+            "collect_reward_mean_per_agent": float(collect_reward) / float(self._pop_size),
         }
         for k, v in grad_metrics.items():
             metrics[f"mean_{k}"] = v
