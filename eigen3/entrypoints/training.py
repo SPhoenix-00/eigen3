@@ -636,6 +636,12 @@ def build_trading_workflow_config(cfg: DictConfig) -> TradingWorkflowConfig:
         target_update_period=target_update_period,
         steps_per_agent=steps_per_agent,
         gradient_vmap_chunk_size=_effective_gradient_vmap_chunk_size(cfg),
+        forced_exploration_buffer_pct=float(
+            OmegaConf.select(cfg, "population.forced_exploration_buffer_pct", default=0.9)
+        ),
+        bnh_penalty_warmup_gens=int(
+            OmegaConf.select(cfg, "population.bnh_penalty_warmup_gens", default=5)
+        ),
     )
 
 

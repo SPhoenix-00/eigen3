@@ -83,6 +83,13 @@ eval_num_workers: 48                  # Eigen2 EVAL_NUM_WORKERS (actual = min(cp
 skip_reevaluation_on_resume: true     # Skip re-eval on resume unless reward function changed
 
 
+# ---------- Curriculum (trading workflow) ----------
+# Forced exploration: override actor coeffs > threshold until replay buffer is this full (0–1).
+forced_exploration_buffer_pct: 0.9
+# After buffer fills, ramp BnH + loss penalty from 0 to full over this many generations.
+bnh_penalty_warmup_gens: 5
+
+
 # ---------- Training Cadence ----------
 # Env steps collected per agent per generation (before gradient updates).
 # ~320 aligns with a typical calendar episode length (mono); was 100 (too thin per gen).

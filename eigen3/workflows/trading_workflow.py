@@ -315,7 +315,7 @@ class TradingWorkflowConfig:
     target_update_period: int = 10
     steps_per_agent: int = 100
     gradient_vmap_chunk_size: Optional[int] = None
-    forced_exploration_buffer_pct: float = 0.5  # Do forced exploration until buffer is this % full
+    forced_exploration_buffer_pct: float = 0.9  # Do forced exploration until buffer is this % full
     bnh_penalty_warmup_gens: int = 5  # Gradually introduce BnH penalty over these generations after forced exploration ends
 
 
@@ -826,10 +826,9 @@ class TradingERLWorkflow:
         raw_fitness = jnp.mean(bottom_k, axis=0)
         coeff_matrix = jnp.stack(all_ep_max_coeff, axis=0)
         mean_max_coeff = jnp.mean(coeff_matrix, axis=0)  # [pop_size]
-        # Epsilon-scaled coefficient bonus: gives non-trading agents (fitness~0)
-        # a gradient toward the trading threshold without distorting agents that
-        # are already trading (whose fitness >> this term).
-        fitness = raw_fitness + mean_max_coeff * 1e-2
+        # Add mean max coefficient so policies that output higher coeffs (toward
+        # the trading threshold) get stronger selection pressure than flat sub-threshold actors.
+        fitness = raw_fitness + mean_max_coeff
         mean_excess = jnp.mean(excess_matrix, axis=0)
         pnl_matrix = jnp.stack(all_ep_pnl, axis=0)
         peak_matrix = jnp.stack(all_ep_peak_capital, axis=0)
