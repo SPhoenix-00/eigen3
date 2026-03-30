@@ -47,6 +47,7 @@ class HallOfFameEntry:
     agent_id: int
     validation_score: float
     generation: int
+    # Validation ROI (%): 100 * sum(episode net $ PnL) / max(episode peak capital employed)
     roi: float = 0.0
     expectancy: float = 0.0
     train_fitness: float = 0.0

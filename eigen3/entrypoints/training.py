@@ -196,6 +196,7 @@ class CompatArtifactManager:
             "pnl_std",
             "win_rate_mean",
             "num_trades_mean",
+            "roi_pct_mean",
         ]
         with summary_csv_path.open("w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=summary_fields)
@@ -210,6 +211,7 @@ class CompatArtifactManager:
             "num_wins",
             "num_losses",
             "total_gain_pct",
+            "episode_roi_pct",
             "total_pnl",
             "win_rate",
             "peak_capital_employed",
@@ -323,7 +325,7 @@ def _print_generation_summary(
     print("Top 5 by Fitness:")
     if top5_evals:
         for rank, (idx, fitness, ev) in enumerate(top5_evals, 1):
-            roi = ev.get('gain_pct_mean', 0.0)
+            roi = ev.get("roi_pct_mean", ev.get("gain_pct_mean", 0.0))
             pnl = ev.get('pnl_mean', 0.0)
             bh_excess = ev.get('bh_excess', 0.0)
             wr_raw = ev.get("win_rate_mean", None)
@@ -377,7 +379,7 @@ def _top5_eval_rows_from_metrics(metrics: dict[str, Any]) -> list[tuple[int, flo
     indices = metrics.get("top5_indices") or []
     fitness_list = metrics.get("top5_fitness") or []
     rm = metrics.get("top5_val_reward_mean") or []
-    gp = metrics.get("top5_gain_pct") or []
+    rp = metrics.get("top5_roi_pct") or metrics.get("top5_gain_pct") or []
     pnl = metrics.get("top5_pnl") or []
     bh = metrics.get("top5_bh_excess_usd") or []
     wr = metrics.get("top5_win_rate") or []
@@ -385,7 +387,8 @@ def _top5_eval_rows_from_metrics(metrics: dict[str, Any]) -> list[tuple[int, flo
     for rank, idx in enumerate(indices):
         ev = {
             "reward_mean": rm[rank] if rank < len(rm) else 0.0,
-            "gain_pct_mean": gp[rank] if rank < len(gp) else 0.0,
+            "roi_pct_mean": rp[rank] if rank < len(rp) else 0.0,
+            "gain_pct_mean": rp[rank] if rank < len(rp) else 0.0,
             "pnl_mean": pnl[rank] if rank < len(pnl) else 0.0,
             "bh_excess": bh[rank] if rank < len(bh) else 0.0,
             "win_rate_mean": wr[rank] if rank < len(wr) else None,
@@ -406,9 +409,12 @@ def _build_eval_payload_from_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         return {"num_episodes": 0, "episodes": []}
     rewards = np.asarray([e["total_reward"] for e in episodes], dtype=np.float64)
     pnls = np.asarray([e["total_pnl"] for e in episodes], dtype=np.float64)
+    peaks = np.asarray([e["peak_capital_employed"] for e in episodes], dtype=np.float64)
     wins = np.asarray([e["win_rate"] for e in episodes], dtype=np.float64)
     trades = np.asarray([e["num_trades"] for e in episodes], dtype=np.float64)
     gains = np.asarray([e["total_gain_pct"] for e in episodes], dtype=np.float64)
+    peak_max = float(np.max(peaks)) if peaks.size else 0.0
+    roi_agg = (100.0 * float(np.sum(pnls)) / peak_max) if peak_max > 0 else 0.0
     return {
         "num_episodes": len(episodes),
         "reward_mean": float(rewards.mean()),
@@ -419,7 +425,9 @@ def _build_eval_payload_from_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "pnl_std": float(pnls.std()),
         "win_rate_mean": float(wins.mean()),
         "num_trades_mean": float(trades.mean()),
-        "gain_pct_mean": float(gains.mean()),
+        "roi_pct_mean": roi_agg,
+        "gain_pct_mean": roi_agg,
+        "sum_gain_pct_mean": float(gains.mean()),
         "episodes": episodes,
     }
 

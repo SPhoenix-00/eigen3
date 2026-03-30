@@ -15,6 +15,7 @@ Key changes from the sequential version:
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass
+from functools import partial
 import logging
 import time
 
@@ -158,6 +159,10 @@ def _offspring_cross_mut(
     )
 
 
+@partial(
+    jax.jit,
+    static_argnames=("pop_size", "elite_count", "tournament_size"),
+)
 def breed_next_generation_batched(
     stacked_params: TradingNetworkParams,
     fitness: chex.Array,
@@ -171,6 +176,9 @@ def breed_next_generation_batched(
     mutation_std: float,
 ) -> TradingNetworkParams:
     """Vectorized breeding: vmapped tournaments + batched gather + ``vmap`` crossover/mutation.
+
+    JIT-compiled once per ``(pop_size, elite_count, tournament_size)``; genetic rates stay
+    dynamic so adaptive mutation does not force recompilation.
 
     Replaces the Python loop over offspring (which forced many host syncs and small kernels).
     Tournament sampling uses the first ``tournament_size`` elements of a random permutation,
