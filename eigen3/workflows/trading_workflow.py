@@ -418,6 +418,7 @@ class TradingERLWorkflow:
         self._vmap_val_reset = jax.jit(jax.vmap(val_env.reset))
 
         pop_size_int = int(self._pop_size)
+        collect_erp = float(getattr(env, "episode_reward_multiplier", 1.0))
 
         def _collect_experience_jitted(
             stacked_params: TradingNetworkParams,
@@ -463,16 +464,18 @@ class TradingERLWorkflow:
                     env_states, all_actions,
                 )
                 
-                # Multiply the *done* bonus by bnh_multiplier (since it was just added in step)
-                # Next state reward already has it. We subtract it out, then add it back scaled.
-                # Next states `episode_benchmark_excess` holds the exact value.
-                # reward = trade_reward + jnp.where(done, bonus, 0.0)
-                # We want: reward = trade_reward + jnp.where(done, bonus * bnh_multiplier, 0.0)
-                
-                # So we subtract the unscaled bonus and add the scaled one:
-                adjusted_reward = next_states.reward - jnp.where(next_states.done, next_states.env_state.episode_benchmark_excess, 0.0) + jnp.where(next_states.done, next_states.env_state.episode_benchmark_excess * bnh_multiplier, 0.0)
-                
-                next_states = next_states.replace(reward=adjusted_reward)
+                # The reward from env.step includes: episode_bonus * episode_reward_multiplier.
+                # episode_benchmark_excess stores the raw bonus (before erp).
+                # We scale the BnH component by bnh_multiplier:
+                #   adjusted = reward + excess * erp * (bnh_multiplier - 1)
+                # bnh_multiplier=0 removes BnH entirely; bnh_multiplier=1 is a no-op.
+                excess = next_states.env_state.episode_benchmark_excess
+                bnh_adj = jnp.where(
+                    next_states.done,
+                    excess * collect_erp * (bnh_multiplier - 1.0),
+                    0.0,
+                )
+                next_states = next_states.replace(reward=next_states.reward + bnh_adj)
                 buf = buffer_insert_batch(
                     buf,
                     obs=env_states.obs,
@@ -663,6 +666,9 @@ class TradingERLWorkflow:
         self,
         stacked_params: TradingNetworkParams,
         key: chex.PRNGKey,
+        bnh_multiplier: float = 1.0,
+        loss_penalty_multiplier: Optional[float] = None,
+        action_bonus: float = 0.0,
     ) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, Dict[str, chex.Array]]:
         """Validate all agents in parallel on held-out data.
 
@@ -711,10 +717,25 @@ class TradingERLWorkflow:
         if hasattr(self.val_env, "episode_buyhold_excess_usd"):
             vmap_excess = jax.vmap(self.val_env.episode_buyhold_excess_usd)
 
+        val_erp = getattr(self.val_env, "episode_reward_multiplier", 1.0)
+        if loss_penalty_multiplier is None:
+            loss_penalty_multiplier = getattr(self.val_env, "loss_penalty_multiplier", 1.25)
+
         for ep in range(n_episodes):
             key, ep_key = random.split(key)
             reset_keys = random.split(ep_key, pop_size)
             env_states = self._vmap_val_reset(reset_keys)
+
+            env_states = env_states.replace(
+                env_state=env_states.env_state.replace(
+                    loss_penalty_multiplier=jnp.full_like(
+                        env_states.env_state.loss_penalty_multiplier, loss_penalty_multiplier,
+                    ),
+                    action_bonus=jnp.full_like(
+                        env_states.env_state.action_bonus, action_bonus,
+                    ),
+                )
+            )
 
             ep_rewards = jnp.zeros(pop_size)
             done_mask = jnp.zeros(pop_size, dtype=jnp.bool_)
@@ -738,6 +759,17 @@ class TradingERLWorkflow:
                     stacked_params, env_states.obs, action_keys,
                 )
                 next_states = self._vmap_val_step(env_states, all_actions)
+
+                if bnh_multiplier != 1.0:
+                    excess = next_states.env_state.episode_benchmark_excess
+                    bnh_adj = jnp.where(
+                        next_states.done,
+                        excess * val_erp * (bnh_multiplier - 1.0),
+                        0.0,
+                    )
+                    next_states = next_states.replace(
+                        reward=next_states.reward + bnh_adj,
+                    )
 
                 step_coeff = jnp.max(all_actions[:, :, 0], axis=-1)
                 ep_max_coeff = jnp.where(
@@ -1009,7 +1041,13 @@ class TradingERLWorkflow:
         t_val_start = time.perf_counter()
         self.key, val_key = random.split(self.key)
         fitness_scores, bh_excess, val_roi_pct, pnl_mean_arr, reward_mean_arr, reward_min_arr, per_episode = (
-            self._validate_population(self._stacked_params, val_key)
+            self._validate_population(
+                self._stacked_params,
+                val_key,
+                bnh_multiplier=bnh_multiplier,
+                loss_penalty_multiplier=loss_penalty_multiplier,
+                action_bonus=action_bonus,
+            )
         )
         t_val_s = time.perf_counter() - t_val_start
         print(f" {t_val_s:.1f}s", flush=True)
