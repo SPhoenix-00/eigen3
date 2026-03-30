@@ -201,9 +201,46 @@ def main(cfg: DictConfig) -> None:
     except Exception as e:
         logger.warning(f"TradingAgent init skipped or failed: {e}")
 
+    # Log population/ERL sizing summary so the operator can sanity-check
+    pop_cfg = OmegaConf.select(cfg, "population", default={})
+    if pop_cfg:
+        logger.info(
+            "Population config: pop_size=%s, elite_frac=%s, "
+            "replay_buffer=%s, batch=%s, grad_steps/gen=%s, eval_episodes=%s",
+            OmegaConf.select(cfg, "population.pop_size", default="?"),
+            OmegaConf.select(cfg, "population.elite_frac", default="?"),
+            OmegaConf.select(cfg, "population.replay_buffer_size", default="?"),
+            OmegaConf.select(cfg, "population.batch_size", default="?"),
+            OmegaConf.select(cfg, "population.gradient_steps_per_gen", default="?"),
+            OmegaConf.select(cfg, "population.eval_episodes", default="?"),
+        )
+
+    # ---- Hall of Fame ----
+    from eigen3.erl.cloud_sync import CloudSync
+    from eigen3.erl.hall_of_fame import HallOfFame
+
+    hof_capacity = int(OmegaConf.select(cfg, "population.hof_capacity", default=10))
+    cloud_project = OmegaConf.select(cfg, "population.cloud_project_name", default="eigen3")
+    cloud_sync = CloudSync.from_env(project_name=cloud_project)
+
+    checkpoint_dir = Path(hydra.utils.to_absolute_path("checkpoints"))
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    hof = HallOfFame(
+        capacity=hof_capacity,
+        checkpoint_dir=checkpoint_dir,
+        cloud_sync=cloud_sync,
+        cloud_prefix=f"{cloud_project}/hall_of_fame",
+    )
+    hof.load()
+    logger.info(
+        "HoF ready: capacity=%d, loaded=%d, cloud=%s",
+        hof.capacity, len(hof), cloud_sync.provider,
+    )
+
     logger.info(
         "Data and env wired. Instantiate TradingERLWorkflow with env=train env, "
-        "eval_env=val_env; reserve holdout for final offline evaluation only."
+        "eval_env=val_env, hall_of_fame=hof; reserve holdout for final offline evaluation only."
     )
 
 

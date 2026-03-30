@@ -1,0 +1,126 @@
+# ============================================================================
+# Population & ERL Sizing — Eigen2-aligned reference values
+# ============================================================================
+# This file is the single source of truth for everything that controls
+# "how many agents, how they compete, how the RL component is sized, and
+# when training stops."  Eigen2 reference values are in trailing comments.
+#
+# Override from the CLI:
+#   python scripts/train.py population.pop_size=48 population.elite_frac=0.5
+# ============================================================================
+
+
+# ---------- Population ----------
+pop_size: 96                          # Eigen2 POPULATION_SIZE (96 distributed, 48 local)
+local_pop_size: 48                    # Eigen2 LOCAL_POPULATION_SIZE
+
+# Selection (fraction-based, as in Eigen2)
+elite_frac: 0.40                      # Eigen2 ELITE_FRAC — top 40% survive unchanged
+offspring_frac: 0.40                  # Eigen2 OFFSPRING_FRAC — 40% bred from elites
+# mutant_frac is the remainder (20%)
+
+
+# ---------- Genetic Operators ----------
+mutation_rate: 0.20                   # Eigen2 MUTATION_RATE (normal mode)
+mutation_rate_consistency: 0.15       # Eigen2 MUTATION_RATE_CONSISTENCY (lower to preserve stable traits)
+mutation_std: 0.025                   # Eigen2 MUTATION_STD — Gaussian noise magnitude
+crossover_alpha_min: 0.2              # Eigen2 CROSSOVER_ALPHA_MIN
+crossover_alpha_max: 0.8              # Eigen2 CROSSOVER_ALPHA_MAX
+tournament_size: 3
+
+# Adaptive mutation: auto-boosts 1.5x when validation plateaus for 3 gens (<2%)
+adaptive_mutation_enabled: true
+adaptive_mutation_plateau_gens: 3     # Generations of <2% improvement before boost
+adaptive_mutation_boost: 1.5          # Multiplier applied to rate and std
+adaptive_mutation_rate_cap: 0.8       # Hard ceiling for mutation_rate
+adaptive_mutation_std_cap: 0.1        # Hard ceiling for mutation_std
+
+
+# ---------- RL Integration ----------
+num_rl_agents: 1                      # Eigen2: 1 DDPG agent embedded in population
+rl_injection_interval: 1              # Inject RL agent every N generations
+champion_injection: true              # Also inject all-time best validation agent
+
+
+# ---------- Replay Buffer ----------
+replay_buffer_size: 1500000           # Eigen2 BUFFER_SIZE
+local_replay_buffer_size: 180000      # Eigen2 LOCAL_BUFFER_SIZE (16 gens of data)
+min_buffer_size: 23200                # Eigen2 MIN_BUFFER_SIZE — start training after this many transitions
+local_min_buffer_size: 8000           # Eigen2 LOCAL_MIN_BUFFER_SIZE (~1 generation)
+min_buffer_size_sweep: 5000           # Eigen2 MIN_BUFFER_SIZE_SWEEP (faster DDPG for sweeps)
+warmup_episodes: 10                   # Fill buffer with random rollouts before first RL update
+
+
+# ---------- Batch & Gradient Sizing ----------
+batch_size: 160                       # Eigen2 BATCH_SIZE
+local_batch_size: 40                  # Eigen2 LOCAL_BATCH_SIZE (fits ~18 GB VRAM)
+gradient_accumulation_steps: 1        # Eigen2 GRADIENT_ACCUMULATION_STEPS
+local_gradient_accumulation_steps: 1  # Eigen2 LOCAL_GRADIENT_ACCUMULATION_STEPS
+gradient_steps_per_gen: 16            # Eigen2 GRADIENT_STEPS_PER_GENERATION
+gradient_steps_per_gen_stabilization: 10  # Eigen2 GRADIENT_STEPS_PER_GENERATION_STABILIZATION
+local_gradient_steps_per_gen: 32      # Eigen2 LOCAL_GRADIENT_STEPS_PER_GENERATION
+local_gradient_steps_per_gen_stabilization: 16  # Eigen2 LOCAL_GRADIENT_STEPS_PER_GENERATION_STABILIZATION
+local_training_agent_batch_size: 8    # Eigen2 LOCAL_TRAINING_AGENT_BATCH_SIZE (GPU batch of agents)
+
+
+# ---------- Evaluation ----------
+eval_episodes: 5                      # Eigen2 EVAL_EPISODES — episodes per agent per evaluation
+conservative_k: 2                     # Average of K worst episodes for pessimistic fitness
+eval_interval: 50                     # Validate best agent every N generations
+eval_num_workers: 48                  # Eigen2 EVAL_NUM_WORKERS (actual = min(cpu_count-1, this))
+skip_reevaluation_on_resume: true     # Skip re-eval on resume unless reward function changed
+
+
+# ---------- Training Cadence ----------
+total_generations: 100                # Eigen2 NUM_GENERATIONS (gauntlet may stop earlier)
+max_generations_gauntlet: 100         # Eigen2 MAX_GENERATIONS_GAUNTLET — hard ceiling
+save_interval: 1                      # Eigen2 SAVE_FREQUENCY (1 = every gen for safety)
+log_interval: 1                       # Eigen2 LOG_FREQUENCY
+
+
+# ---------- Gauntlet / Breakthrough Mode ----------
+# Shift from "run N gens" to "achieve N confirmed breakthroughs".
+# Addresses "ghost score" problem where lucky spikes stall progress.
+gauntlet_enabled: true                # Eigen2 GAUNTLET_MODE_ENABLED
+
+# Breakthrough detection
+breakthrough_warmup_gens: 3           # Eigen2 BREAKTHROUGH_WARMUP_GENERATIONS — skip early churning
+breakthrough_threshold_normal: 0.10   # 10% improvement over baseline (normal mode)
+breakthrough_threshold_consistency: 0.05  # 5% (consistency mode, stricter)
+breakthrough_quorum_normal: 1         # Agents required to simultaneously breach
+breakthrough_quorum_consistency: 1
+
+target_breakthroughs_normal: 4        # Eigen2 TARGET_BREAKTHROUGHS_NORMAL — stop after 4 confirmed
+target_breakthroughs_consistency: 8   # Eigen2 TARGET_BREAKTHROUGHS_CONSISTENCY (deprecated, uses turnovers)
+
+# Efficiency gating (prevents "volume swindling")
+efficiency_baseline_roi: 8.0         # Eigen2 EFFICIENCY_BASELINE_ROI (% ROI for neutral adjustment)
+
+# Asset selection — filter weak candidates before expensive stress testing
+max_candidates_for_stress_test: 5     # Eigen2 MAX_CANDIDATES_FOR_STRESS_TEST
+stress_test_enabled: true             # Eigen2 STRESS_TEST_ENABLED
+
+# Stabilization — lock training on candidate for N gens
+stabilization_generations: 3          # Eigen2 STABILIZATION_GENERATIONS
+stabilization_ghost_detection: false  # Abort if fitness drops below baseline
+
+# Gauntlet validation slices
+gauntlet_num_slices: 20               # Eigen2 GAUNTLET_NUM_SLICES (vs 7 for normal)
+
+
+# ---------- Hall of Fame ----------
+# Persistent archive of the best agents across all generations.
+# Syncs to GCS when CLOUD_PROVIDER=gcs and CLOUD_BUCKET are set.
+hof_capacity: 10                     # Eigen2 HoF capacity (top-10 agents)
+hof_erosion_alpha: 0.33              # Eigen2 HOF_EROSION_ALPHA — EMA smoothing for score erosion
+target_hof_turnovers: 3              # Eigen2 TARGET_HOF_TURNOVERS (consistency mode)
+roi_adjustment_multiplier: 50.0      # Eigen2 ROI_ADJUSTMENT_MULTIPLIER
+roi_confidence_min_trades: 30        # Eigen2 ROI_CONFIDENCE_MIN_TRADES
+roi_quality_threshold: 10.0          # Eigen2 ROI_QUALITY_THRESHOLD (min gain_pct for "quality" trade)
+
+# Cloud sync (reads CLOUD_PROVIDER / CLOUD_BUCKET / GOOGLE_APPLICATION_CREDENTIALS from env)
+cloud_project_name: "eigen3"         # Prefix inside the bucket (e.g. gs://bucket/eigen3/hall_of_fame/)
+
+
+# ---------- Consistency Mode ----------
+consistency_loss_multiplier: 1.5     # Eigen2 CONSISTENCY_LOSS_MULTIPLIER — magnify losses 1.5x

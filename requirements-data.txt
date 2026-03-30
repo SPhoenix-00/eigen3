@@ -1,0 +1,5 @@
+# Minimal deps for CSV preprocessing (process_eigen_data.py).
+# Safe on native Windows (no JAX / orbax / uvloop).
+
+numpy>=1.24.0
+pandas>=2.0.0

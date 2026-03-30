@@ -1,83 +1,61 @@
 # Trading ERL Agent Configuration
-# Based on Eigen2's ERL parameters with JAX/EvoRL adaptations
+# DDPG hyperparameters, network architecture, and optimizer.
+# Population/ERL sizing lives in configs/population/default.yaml.
 
-# Workflow class (will be implemented)
+# Workflow class
 workflow_cls: eigen3.workflows.trading_workflow.TradingERLWorkflow
 
-# Population parameters
-pop_size: 16
-num_elites: 6  # 37.5% of population (same as Eigen2)
-tournament_size: 3
-
-# RL agent parameters
-num_rl_agents: 1  # Number of RL agents in population
-rl_updates_per_gen: 32  # Gradient steps per generation
-batch_size: 64
-gradient_accumulation_steps: 2  # Effective batch size: 128
-
 # DDPG hyperparameters (Eigen2-aligned)
-discount: 0.99
-tau: 0.005  # Soft target update rate
-exploration_noise: 0.125  # Eigen2 NOISE_SCALE
-noise_decay: 0.99995  # Eigen2 NOISE_DECAY
-min_noise: 0.01  # Eigen2 MIN_NOISE
-policy_noise: 0.2  # For TD3-style delayed policy updates
+discount: 0.99                        # Eigen2 GAMMA
+tau: 0.005                            # Eigen2 TAU — soft target update rate
+exploration_noise: 0.125              # Eigen2 NOISE_SCALE
+noise_decay: 0.99995                  # Eigen2 NOISE_DECAY
+min_noise: 0.01                       # Eigen2 MIN_NOISE
+policy_noise: 0.2                     # TD3-style delayed policy updates
 clip_policy_noise: 0.5
-actor_update_interval: 2  # Update actor every N critic updates
+actor_update_interval: 2              # Update actor every N critic updates
 
-# Genetic algorithm parameters
-mutation_strength: 0.025  # Gaussian noise std (same as Eigen2)
-mutation_rate: 0.2  # 20% of parameters mutated
-crossover_alpha_min: 0.2
-crossover_alpha_max: 0.8
-
-# Evaluation parameters
-episodes_per_agent: 5  # Multi-slice evaluation
-conservative_k: 2  # Average of K worst episodes for fitness
-
-# RL injection
-rl_injection_interval: 1  # Inject RL agent every N generations
-champion_injection: true  # Inject all-time best validation agent
-
-# Replay buffer
-replay_buffer_size: 100000
-warmup_episodes: 10  # Fill buffer before training
-
-# Network architecture (Eigen2: 117 columns, 151 context).
-# Mono (env=trading_mono): scripts/train.py builds Actor/DoubleCritic from env.num_columns / num_features_obs / investable_*.
+# Network architecture
+# Mono (env=trading_mono): scripts/train.py builds Actor/DoubleCritic from
+# env.num_columns / num_features_obs / investable_*.
 actor_network:
-  num_stocks: 108
-  stock_start_idx: 9  # Eigen2 INVESTABLE_START_COL
+  num_stocks: 108                     # Eigen2 NUM_INVESTABLE_STOCKS
+  stock_start_idx: 9                  # Eigen2 INVESTABLE_START_COL
+  hidden_dims: [256, 128, 64]         # Eigen2 ACTOR_HIDDEN_DIMS
+  dropout_rate: 0.2                   # Eigen2 DROPOUT_RATE
+  dropout_rate_heads: 0.2             # Eigen2 DROPOUT_RATE_HEADS
   use_remat: true
 
 critic_network:
+  hidden_dims: [256, 128]             # Eigen2 CRITIC_HIDDEN_DIMS
+  dropout_rate: 0.2                   # Eigen2 DROPOUT_RATE
   use_attention: false
   use_remat: true
 
 feature_extractor:
-  num_columns: 117  # Eigen2 TOTAL_COLUMNS (skinny); override via env for mono
-  cnn_filters: 32
-  lstm_hidden_size: 128
-  num_lstm_layers: 2
+  num_columns: 117                    # Eigen2 TOTAL_COLUMNS (skinny); override via env for mono
+  cnn_filters: 32                     # Eigen2 CNN_FILTERS
+  cnn_kernel_size: 3                  # Eigen2 CNN_KERNEL_SIZE
+  lstm_hidden_size: 128               # Eigen2 LSTM_HIDDEN
+  num_lstm_layers: 2                  # Eigen2 LSTM_LAYERS
+  lstm_bidirectional: true            # Eigen2 LSTM_BIDIRECTIONAL
+  dropout_2d_rate: 0.1                # Eigen2 DROPOUT_2D_RATE
   chunk_size: 64
 
 attention_module:
   embed_dim: 256
-  num_heads: 8
+  num_heads: 8                        # Eigen2 ATTENTION_HEADS
   dropout_rate: 0.1
+  use_attention: true                 # Eigen2 USE_ATTENTION
 
-# Optimizer
+# Optimizer (Eigen2 uses separate actor/critic LRs)
 optimizer:
   name: adam
-  lr: 0.0003
-  weight_decay: 0.0
+  actor_lr: 0.0001                    # Eigen2 ACTOR_LR
+  critic_lr: 0.0003                   # Eigen2 CRITIC_LR
+  weight_decay: 0.0005                # Eigen2 WEIGHT_DECAY
   grad_clip_norm: 1.0
   eps: 1e-8
-
-# Training
-total_generations: 10000
-eval_interval: 50  # Validate best agent every N generations
-save_interval: 100  # Save checkpoint every N generations
 
 # Loss weights
 loss_weights:
@@ -85,4 +63,4 @@ loss_weights:
   critic_loss: 1.0
 
 # Mixed precision training
-use_mixed_precision: false  # JAX handles precision automatically
+use_mixed_precision: false            # JAX handles precision automatically

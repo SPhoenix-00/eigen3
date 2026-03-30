@@ -9,6 +9,7 @@ specifically designed for the stock trading environment. It combines:
 
 from typing import Dict, Any, Optional, Tuple, List
 from dataclasses import dataclass
+import logging
 import chex
 import jax
 import jax.numpy as jnp
@@ -20,6 +21,9 @@ from evorl.envs import Env
 from evorl.agent import Agent, AgentState
 from evorl.evaluators import Evaluator
 from eigen3.agents import TradingNetworkParams
+from eigen3.erl.hall_of_fame import HallOfFame
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -75,6 +79,7 @@ class TradingERLWorkflow:
         config: TradingWorkflowConfig,
         seed: int = 0,
         eval_env: Optional[Env] = None,
+        hall_of_fame: Optional[HallOfFame] = None,
     ):
         """Initialize the trading ERL workflow
 
@@ -87,6 +92,7 @@ class TradingERLWorkflow:
             eval_env: Optional environment for fitness / validation rollouts (defaults to ``env``).
                 Use a validation slice with ``is_training=False`` so evaluation matches held-out
                 protocol; keep ``env`` on the training timeline only.
+            hall_of_fame: Optional persistent HoF (synced to GCS) for cross-run agent archive.
         """
         self.env = env
         self.eval_env = eval_env if eval_env is not None else env
@@ -101,6 +107,9 @@ class TradingERLWorkflow:
         self.replay_buffer = None
         self.generation = 0
         self.total_env_steps = 0
+
+        # Hall of Fame — persistent archive of the best agents
+        self.hof = hall_of_fame
 
     def _initialize_population(self, key: chex.PRNGKey) -> List[TradingNetworkParams]:
         """Initialize a population of agents with random parameters
@@ -492,6 +501,36 @@ class TradingERLWorkflow:
 
         fitness_scores = jnp.array(fitness_scores)
 
+        # Phase 2b: Update Hall of Fame with this generation's candidates
+        if self.hof is not None:
+            hof_candidates = [
+                (
+                    self.population[i],
+                    float(fitness_scores[i]),
+                    i,       # agent_idx
+                    0.0,     # roi  (populated when full fitness computed)
+                    0.0,     # expectancy
+                    0.0,     # train_fitness
+                    0,       # quality_count
+                    0,       # total_trades
+                    float(fitness_scores[i]),  # val_fitness
+                    float(fitness_scores[i]),  # base_combined_fitness
+                )
+                for i in range(len(self.population))
+            ]
+            hof_results = self.hof.update_from_generation(
+                hof_candidates, self.generation
+            )
+            admitted = [r for r in hof_results if "admitted" in r[2] or "replaced" in r[2]]
+            if admitted:
+                logger.info(
+                    "HoF gen %d: %d admitted/replaced  (size=%d, best=%.2f)",
+                    self.generation,
+                    len(admitted),
+                    len(self.hof),
+                    self.hof.get_stats()["best_score"],
+                )
+
         # Phase 3: Selection and breeding
         # Keep elite agents
         elite_indices = jnp.argsort(fitness_scores)[-self.config.elite_size:]
@@ -519,8 +558,12 @@ class TradingERLWorkflow:
         self.population = new_population
         self.generation += 1
 
+        # Persist HoF to disk (and GCS)
+        if self.hof is not None:
+            self.hof.save()
+
         # Return metrics
-        return {
+        metrics: Dict[str, Any] = {
             'generation': self.generation,
             'mean_fitness': float(jnp.mean(fitness_scores)),
             'max_fitness': float(jnp.max(fitness_scores)),
@@ -530,6 +573,15 @@ class TradingERLWorkflow:
             'mean_actor_loss': float(jnp.mean(jnp.array([m.get('actor_loss', 0.0) for m in all_metrics]))),
             'mean_critic_loss': float(jnp.mean(jnp.array([m.get('critic_loss', 0.0) for m in all_metrics]))),
         }
+
+        if self.hof is not None:
+            hof_stats = self.hof.get_stats()
+            metrics['hof_size'] = hof_stats['size']
+            metrics['hof_best'] = hof_stats['best_score']
+            metrics['hof_worst'] = hof_stats['worst_score']
+            metrics['hof_median_roi'] = hof_stats['median_roi']
+
+        return metrics
 
     def train(self, num_generations: int) -> List[Dict[str, Any]]:
         """Train for multiple generations
@@ -584,6 +636,7 @@ def create_trading_workflow(
     config: Optional[TradingWorkflowConfig] = None,
     seed: int = 0,
     eval_env: Optional[Env] = None,
+    hall_of_fame: Optional[HallOfFame] = None,
 ) -> TradingERLWorkflow:
     """Convenience function to create a trading ERL workflow
 
@@ -594,6 +647,7 @@ def create_trading_workflow(
         config: Workflow configuration (uses defaults if None)
         seed: Random seed
         eval_env: Optional separate env for validation-style evaluation
+        hall_of_fame: Optional persistent HoF (synced to GCS)
 
     Returns:
         Initialized TradingERLWorkflow
@@ -608,4 +662,5 @@ def create_trading_workflow(
         config=config,
         seed=seed,
         eval_env=eval_env,
+        hall_of_fame=hall_of_fame,
     )

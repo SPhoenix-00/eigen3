@@ -1,0 +1,27 @@
+# Full Eigen3 + EvoRL training stack.
+# Use on Linux, macOS, or WSL. Native Windows typically fails when resolving
+# orbax-checkpoint -> uvloop (uvloop is Unix-only).
+
+-r requirements-data.txt
+
+# EvoRL: pulls jax, jaxlib, optax, chex, gymnasium, hydra-core, wandb,
+# orbax-checkpoint, scipy, brax, distrax, tfp-nightly[jax], evox, pandas, etc.
+-e ./evorl
+
+# Used by eigen3 models / scripts; not listed in evorl's core dependencies.
+flax>=0.8.0
+jaxtyping>=0.2.25
+omegaconf>=2.3.0
+tensorboard>=2.14.0
+tensorboardX>=2.6
+matplotlib>=3.7.0
+seaborn>=0.12.0
+tqdm>=4.65.0
+pyyaml>=6.0
+typing-extensions>=4.8.0
+
+# Optional env backend for EvoRL (import is guarded in evorl.envs).
+gymnax>=0.0.6
+
+# Eigen3 package (import path eigen3.*)
+-e .
