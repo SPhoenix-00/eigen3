@@ -48,18 +48,39 @@ class TeeLogger:
     def __init__(self, filepath: Path, terminal):
         self.terminal = terminal
         self.log_file = open(filepath, "w", encoding="utf-8", buffering=1)
+        self.verbosity = os.environ.get("EIGEN3_VERBOSITY", "normal").lower()
+        self._suppress_xla_block = False
+
+    def _is_noise_line(self, line: str) -> bool:
+        if self.verbosity == "verbose":
+            return False
+        s = line.strip()
+        if self._suppress_xla_block:
+            if s == "}":
+                self._suppress_xla_block = False
+            return True
+        if "xtile_compiler.cc:" in s:
+            if "Computation:" in s:
+                self._suppress_xla_block = True
+            return True
+        return False
 
     def write(self, message: str) -> None:
-        self.terminal.write(message)
-        self.terminal.flush()
         if "\r" in message:
+            self.terminal.write(message)
+            self.terminal.flush()
             last = message.split("\r")[-1].strip()
             if _is_tqdm_final_line(last):
                 self.log_file.write(last + "\n")
                 self.log_file.flush()
-        else:
-            self.log_file.write(message)
-            self.log_file.flush()
+            return
+        for line in message.splitlines(keepends=True):
+            if self._is_noise_line(line):
+                continue
+            self.terminal.write(line)
+            self.log_file.write(line)
+        self.terminal.flush()
+        self.log_file.flush()
 
     def flush(self) -> None:
         self.terminal.flush()
@@ -232,6 +253,52 @@ def _phase_log(label: str) -> None:
     logger.info("========== %s ==========", label)
 
 
+def _print_generation_summary(
+    *,
+    gen: int,
+    num_gen: int,
+    metrics: dict[str, Any],
+    progress_eval: dict[str, Any],
+) -> None:
+    bsz = int(metrics.get("buffer_size", 0))
+    bcap = max(1, int(metrics.get("buffer_capacity", 1)))
+    print("=" * 60)
+    print(
+        f"Generation {gen}/{num_gen} | Buffer: {bsz}/{bcap} ({100.0 * bsz / bcap:.1f}%) | "
+        f"Env steps: {metrics.get('total_env_steps', '?')}"
+    )
+    print(
+        "Train: "
+        f"collect/agent={metrics.get('collect_reward_mean_per_agent', 0.0):.2f}  "
+        f"actor_loss={metrics.get('mean_actor_loss', float('nan')):.4f}  "
+        f"critic_loss={metrics.get('mean_critic_loss', float('nan')):.4f}  "
+        f"q={metrics.get('mean_mean_q', float('nan')):.4f}"
+    )
+    print(
+        "Validation: "
+        f"mean={metrics.get('mean_fitness', 0.0):.2f}  "
+        f"max={metrics.get('max_fitness', 0.0):.2f}  "
+        f"min={metrics.get('min_fitness', 0.0):.2f}  "
+        f"std={metrics.get('std_fitness', 0.0):.2f}  "
+        f"best_agent={metrics.get('best_agent_idx', -1)}"
+    )
+    print(
+        "Best-agent check: "
+        f"PnL={progress_eval.get('pnl_mean', 0.0):.2f}  "
+        f"ROI={progress_eval.get('gain_pct_mean', 0.0):.2f}%  "
+        f"WR={100.0 * progress_eval.get('win_rate_mean', 0.0):.1f}%  "
+        f"trades={progress_eval.get('num_trades_mean', 0.0):.1f}"
+    )
+    if "hof_size" in metrics:
+        print(
+            "HoF: "
+            f"size={metrics.get('hof_size', 0)}  "
+            f"best={metrics.get('hof_best', 0.0):.2f}  "
+            f"median_roi={metrics.get('hof_median_roi', 0.0):.2f}%"
+        )
+    print("=" * 60)
+
+
 def _evaluate_agent_on_env(
     *,
     env: TradingEnv,
@@ -249,30 +316,46 @@ def _evaluate_agent_on_env(
         state = env.reset(reset_key)
         total_reward = 0.0
         steps = 0
-        while not bool(state.done):
+        # Batched host read: separate bool(done)/float(reward) sync twice per step and idle the GPU.
+        while True:
             obs_batch = state.obs[None, ...]
             sample = SampleBatch(obs=obs_batch)
             key, act_key = jax.random.split(key)
             actions, _ = agent.evaluate_actions(agent_state, sample, act_key)
             action = actions[0]
             state = env.step(state, action)
-            total_reward += float(state.reward)
+            done_h, rew_h = jax.device_get((state.done, state.reward))
+            total_reward += float(rew_h)
             steps += 1
+            if bool(done_h):
+                break
 
         es = state.env_state
+        nt, nw, nl, tgp, tpnl, pce, dwp, dwo = jax.device_get(
+            (
+                es.num_trades,
+                es.num_wins,
+                es.num_losses,
+                es.total_gain_pct,
+                es.total_pnl,
+                es.peak_capital_employed,
+                es.days_with_positions,
+                es.days_without_positions,
+            )
+        )
         episodes.append(
             {
                 "total_reward": total_reward,
                 "steps": steps,
-                "num_trades": int(es.num_trades),
-                "num_wins": int(es.num_wins),
-                "num_losses": int(es.num_losses),
-                "total_gain_pct": float(es.total_gain_pct),
-                "total_pnl": float(es.total_pnl),
-                "peak_capital_employed": float(es.peak_capital_employed),
-                "days_with_positions": int(es.days_with_positions),
-                "days_without_positions": int(es.days_without_positions),
-                "win_rate": float(es.num_wins) / max(int(es.num_trades), 1),
+                "num_trades": int(nt),
+                "num_wins": int(nw),
+                "num_losses": int(nl),
+                "total_gain_pct": float(tgp),
+                "total_pnl": float(tpnl),
+                "peak_capital_employed": float(pce),
+                "days_with_positions": int(dwp),
+                "days_without_positions": int(dwo),
+                "win_rate": float(nw) / max(int(nt), 1),
             }
         )
 
@@ -280,6 +363,7 @@ def _evaluate_agent_on_env(
     pnls = np.asarray([e["total_pnl"] for e in episodes], dtype=np.float64)
     wins = np.asarray([e["win_rate"] for e in episodes], dtype=np.float64)
     trades = np.asarray([e["num_trades"] for e in episodes], dtype=np.float64)
+    gains = np.asarray([e["total_gain_pct"] for e in episodes], dtype=np.float64)
     return {
         "num_episodes": int(num_episodes),
         "reward_mean": float(rewards.mean()),
@@ -290,6 +374,7 @@ def _evaluate_agent_on_env(
         "pnl_std": float(pnls.std()),
         "win_rate_mean": float(wins.mean()),
         "num_trades_mean": float(trades.mean()),
+        "gain_pct_mean": float(gains.mean()),
         "episodes": episodes,
     }
 
@@ -727,6 +812,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
 
     log_vram = bool(OmegaConf.select(cfg, "logging.log_gpu_memory", default=True))
     vram_interval = int(OmegaConf.select(cfg, "logging.log_gpu_memory_every_n_generations", default=0))
+    progress_eval_episodes = int(OmegaConf.select(cfg, "logging.progress_eval_episodes", default=1))
     if log_vram:
         log_gpu_memory_report(logger, "workflow initialized (replay + compiled graphs warm)")
 
@@ -743,32 +829,49 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
             if log_vram and should_log_gpu_memory_this_generation(vram_interval, gen):
                 log_gpu_memory_report(logger, f"after generation {gen + 1}/{num_gen}")
             all_metrics.append(metrics)
-            print(
-                f"Generation {gen + 1}/{num_gen}  "
-                f"Mean: {metrics['mean_fitness']:.2f}  "
-                f"Max: {metrics['max_fitness']:.2f}  "
-                f"Min: {metrics['min_fitness']:.2f}  "
-                f"Steps: {metrics['total_env_steps']}"
+            best_params_for_progress = workflow.get_last_best_agent()
+            logger.info(
+                "Validation rollout for progress (%d episode(s), best-of-gen agent)...",
+                max(1, progress_eval_episodes),
+            )
+            progress_eval = _evaluate_agent_on_env(
+                env=val_env,
+                agent=agent,
+                params=best_params_for_progress,
+                seed=int(cfg.seed) + gen + 500_000,
+                num_episodes=max(1, progress_eval_episodes),
+            )
+            _print_generation_summary(
+                gen=gen + 1,
+                num_gen=num_gen,
+                metrics=metrics,
+                progress_eval=progress_eval,
             )
             if artifact_mgr is not None:
                 artifact_mgr.append_metric(metrics)
                 score = float(metrics.get("max_fitness", float("-inf")))
                 if score > best_score:
                     best_score = score
-                    best_params = workflow.get_last_best_agent()
+                    best_params = best_params_for_progress
+                    logger.info(
+                        "New best (gen=%s); saving checkpoint and artifact eval...",
+                        metrics.get("generation", gen + 1),
+                    )
                     best_path = artifact_mgr.save_best_agent(
                         best_params,
                         generation=int(metrics.get("generation", gen + 1)),
                         score=score,
                     )
+                    _art_eps = min(
+                        3, int(OmegaConf.select(cfg, "population.eval_episodes", default=5))
+                    )
+                    logger.info("Artifact validation rollouts (%d episode(s))...", _art_eps)
                     eval_payload = _evaluate_agent_on_env(
                         env=val_env,
                         agent=agent,
                         params=best_params,
                         seed=int(cfg.seed) + gen + 1000,
-                        num_episodes=min(
-                            3, int(OmegaConf.select(cfg, "population.eval_episodes", default=5))
-                        ),
+                        num_episodes=_art_eps,
                     )
                     eval_payload["run_name"] = run_name
                     eval_payload["generation"] = int(metrics.get("generation", gen + 1))

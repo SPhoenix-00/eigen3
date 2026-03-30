@@ -122,31 +122,44 @@ def run_episode(env: TradingEnv, agent: TradingAgent, agent_state, key):
     total_reward = 0.0
     steps = 0
 
-    while not bool(state.done):
+    while True:
         obs_batch = state.obs[None, ...]
         sample = SampleBatch(obs=obs_batch)
         key, act_key = jax.random.split(key)
         actions, _ = agent.evaluate_actions(agent_state, sample, act_key)
         action = actions[0]
         state = env.step(state, action)
-        total_reward += float(state.reward)
+        done_h, rew_h = jax.device_get((state.done, state.reward))
+        total_reward += float(rew_h)
         steps += 1
+        if bool(done_h):
+            break
 
     es = state.env_state
+    nt, nw, nl, tgp, tpnl, pce, dwp, dwo = jax.device_get(
+        (
+            es.num_trades,
+            es.num_wins,
+            es.num_losses,
+            es.total_gain_pct,
+            es.total_pnl,
+            es.peak_capital_employed,
+            es.days_with_positions,
+            es.days_without_positions,
+        )
+    )
     return {
         "total_reward": total_reward,
         "steps": steps,
-        "num_trades": int(es.num_trades),
-        "num_wins": int(es.num_wins),
-        "num_losses": int(es.num_losses),
-        "total_gain_pct": float(es.total_gain_pct),
-        "total_pnl": float(es.total_pnl),
-        "peak_capital_employed": float(es.peak_capital_employed),
-        "days_with_positions": int(es.days_with_positions),
-        "days_without_positions": int(es.days_without_positions),
-        "win_rate": (
-            float(es.num_wins) / max(int(es.num_trades), 1)
-        ),
+        "num_trades": int(nt),
+        "num_wins": int(nw),
+        "num_losses": int(nl),
+        "total_gain_pct": float(tgp),
+        "total_pnl": float(tpnl),
+        "peak_capital_employed": float(pce),
+        "days_with_positions": int(dwp),
+        "days_without_positions": int(dwo),
+        "win_rate": float(nw) / max(int(nt), 1),
     }
 
 
