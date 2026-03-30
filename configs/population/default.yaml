@@ -46,7 +46,8 @@ champion_injection: true              # Also inject all-time best validation age
 
 # ---------- Replay Buffer ----------
 replay_buffer_size: 1500000           # Eigen2 BUFFER_SIZE (multi-GPU / pmap)
-local_replay_buffer_size: 180000      # Single-GPU default (num_devices=1, enable_pmap=false)
+# Single-GPU: loss vmap is chunked (local_training_agent_batch_size), so replay can be larger than the pre-chunk 180k default.
+local_replay_buffer_size: 400000      # ~11 GiB float32 obs+next_obs at 151x18x1; lower if nvidia-smi is tight
 min_buffer_size: 23200                # Eigen2 MIN_BUFFER_SIZE — start training after this many transitions
 local_min_buffer_size: 8000           # Eigen2 LOCAL_MIN_BUFFER_SIZE (~1 generation)
 min_buffer_size_sweep: 5000           # Eigen2 MIN_BUFFER_SIZE_SWEEP (faster DDPG for sweeps)
@@ -55,7 +56,8 @@ warmup_episodes: 10                   # Fill buffer with random rollouts before 
 
 # ---------- Batch & Gradient Sizing ----------
 batch_size: 160                       # Used when enable_pmap or num_devices>1
-local_batch_size: 40                  # Single-GPU gradient batch (num_devices=1, enable_pmap=false)
+# Single-GPU: chunked loss vmap frees peak XLA memory; 96 is a middle ground vs Eigen2 160 (raise toward 160 if VRAM allows).
+local_batch_size: 96
 gradient_accumulation_steps: 1        # Eigen2 GRADIENT_ACCUMULATION_STEPS
 local_gradient_accumulation_steps: 1  # Eigen2 LOCAL_GRADIENT_ACCUMULATION_STEPS
 gradient_steps_per_gen: 16            # Eigen2 GRADIENT_STEPS_PER_GENERATION
