@@ -259,44 +259,103 @@ def _print_generation_summary(
     num_gen: int,
     metrics: dict[str, Any],
     progress_eval: dict[str, Any],
+    prev_metrics: Optional[dict[str, Any]] = None,
+    prev_eval: Optional[dict[str, Any]] = None,
+    avg_gen_seconds: Optional[float] = None,
 ) -> None:
+    def _delta(curr: float, prev: Optional[float], suffix: str = "") -> str:
+        if prev is None:
+            return ""
+        d = curr - prev
+        sign = "+" if d >= 0 else ""
+        return f"  ({sign}{d:.2f}{suffix})"
+
+    def _fmt_time(seconds: float) -> str:
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        return f"{seconds / 60.0:.1f}m"
+
+    def _pct(x: float, total: float) -> float:
+        return 0.0 if total <= 0 else (100.0 * x / total)
+
     bsz = int(metrics.get("buffer_size", 0))
     bcap = max(1, int(metrics.get("buffer_capacity", 1)))
-    print("=" * 60)
+    t_eval = float(metrics.get("timing_eval_s", 0.0))
+    t_train = float(metrics.get("timing_train_s", 0.0))
+    t_collect = float(metrics.get("timing_collect_s", 0.0))
+    t_evolve = float(metrics.get("timing_evolve_s", 0.0))
+    t_hof = float(metrics.get("timing_hof_s", 0.0))
+    t_total = float(metrics.get("timing_total_s", t_eval + t_train + t_collect + t_evolve + t_hof))
+    remaining = max(0, num_gen - gen)
+    eta_s = (avg_gen_seconds or t_total) * remaining
+
+    print("\n--- Generation Timing Breakdown ---")
+    print(f"  Collect:    {t_collect:.2f}s ({_pct(t_collect, t_total):.1f}%)")
+    print(f"  Evaluation: {t_eval:.2f}s ({_pct(t_eval, t_total):.1f}%)")
+    print(f"  Training:   {t_train:.2f}s ({_pct(t_train, t_total):.1f}%)")
+    print(f"  HoF:        {t_hof:.2f}s ({_pct(t_hof, t_total):.1f}%)")
+    print(f"  Evolution:  {t_evolve:.2f}s ({_pct(t_evolve, t_total):.1f}%)")
+    print(f"  Total:      {t_total:.2f}s")
+    print("-" * 40)
+    print("\n" + "=" * 70)
+    print(f"  Gen {gen}/{num_gen} | {_fmt_time(t_total)} | ETA {_fmt_time(eta_s)}")
+    print("=" * 70)
+    print("\n  BEST AGENT")
+    print("  -------------------------------------------------------")
     print(
-        f"Generation {gen}/{num_gen} | Buffer: {bsz}/{bcap} ({100.0 * bsz / bcap:.1f}%) | "
-        f"Env steps: {metrics.get('total_env_steps', '?')}"
+        f"  Fitness: {metrics.get('best_agent_fitness', 0.0):9.2f}"
+        f"{_delta(float(metrics.get('best_agent_fitness', 0.0)), float(prev_metrics.get('best_agent_fitness')) if prev_metrics else None)}"
     )
     print(
-        "Train: "
-        f"collect/agent={metrics.get('collect_reward_mean_per_agent', 0.0):.2f}  "
-        f"actor_loss={metrics.get('mean_actor_loss', float('nan')):.4f}  "
-        f"critic_loss={metrics.get('mean_critic_loss', float('nan')):.4f}  "
+        f"  ROI:     {progress_eval.get('gain_pct_mean', 0.0):9.2f}%"
+        f"{_delta(float(progress_eval.get('gain_pct_mean', 0.0)), float(prev_eval.get('gain_pct_mean')) if prev_eval else None, '%')}"
+    )
+    print(
+        f"  WinRate: {100.0 * progress_eval.get('win_rate_mean', 0.0):9.1f}%"
+        f"{_delta(100.0 * float(progress_eval.get('win_rate_mean', 0.0)), 100.0 * float(prev_eval.get('win_rate_mean')) if prev_eval else None, '%')}"
+    )
+    print(
+        f"  PnL:     {progress_eval.get('pnl_mean', 0.0):9.2f}"
+        f"{_delta(float(progress_eval.get('pnl_mean', 0.0)), float(prev_eval.get('pnl_mean')) if prev_eval else None)}"
+    )
+    print(f"  Trades:  {progress_eval.get('num_trades_mean', 0.0):9.1f}")
+    print("\n  POPULATION")
+    print("  -------------------------------------------------------")
+    positive = int(metrics.get("positive_agents", 0))
+    print(
+        f"  Fitness: best={metrics.get('max_fitness', 0.0):8.2f}  "
+        f"mean={metrics.get('mean_fitness', 0.0):8.2f}  "
+        f"std={metrics.get('std_fitness', 0.0):8.2f}"
+    )
+    print(f"  Positive: {positive}/{int(metrics.get('population_size', 0) or 0)} agents")
+    print(
+        f"  Train: collect/agent={metrics.get('collect_reward_mean_per_agent', 0.0):.2f}  "
+        f"actor={metrics.get('mean_actor_loss', float('nan')):.4f}  "
+        f"critic={metrics.get('mean_critic_loss', float('nan')):.4f}  "
         f"q={metrics.get('mean_mean_q', float('nan')):.4f}"
     )
-    print(
-        "Validation: "
-        f"mean={metrics.get('mean_fitness', 0.0):.2f}  "
-        f"max={metrics.get('max_fitness', 0.0):.2f}  "
-        f"min={metrics.get('min_fitness', 0.0):.2f}  "
-        f"std={metrics.get('std_fitness', 0.0):.2f}  "
-        f"best_agent={metrics.get('best_agent_idx', -1)}"
-    )
-    print(
-        "Best-agent check: "
-        f"PnL={progress_eval.get('pnl_mean', 0.0):.2f}  "
-        f"ROI={progress_eval.get('gain_pct_mean', 0.0):.2f}%  "
-        f"WR={100.0 * progress_eval.get('win_rate_mean', 0.0):.1f}%  "
-        f"trades={progress_eval.get('num_trades_mean', 0.0):.1f}"
-    )
     if "hof_size" in metrics:
+        print("\n  HALL OF FAME")
+        print("  -------------------------------------------------------")
         print(
-            "HoF: "
-            f"size={metrics.get('hof_size', 0)}  "
-            f"best={metrics.get('hof_best', 0.0):.2f}  "
-            f"median_roi={metrics.get('hof_median_roi', 0.0):.2f}%"
+            f"  Size: {metrics.get('hof_size', 0)}  |  "
+            f"Best: {metrics.get('hof_best', 0.0):.2f}  "
+            f"Worst: {metrics.get('hof_worst', 0.0):.2f}"
         )
-    print("=" * 60)
+        print(f"  Median ROI: {metrics.get('hof_median_roi', 0.0):.2f}%")
+    print("\n  LOOP PERFORMANCE")
+    print("  -------------------------------------------------------")
+    print(
+        f"  Eval: {_fmt_time(t_eval)} ({_pct(t_eval, t_total):.0f}%)  |  "
+        f"Train: {_fmt_time(t_train)} ({_pct(t_train, t_total):.0f}%)  |  "
+        f"Collect: {_fmt_time(t_collect)} ({_pct(t_collect, t_total):.0f}%)  |  "
+        f"Evolve: {_fmt_time(t_evolve)} ({_pct(t_evolve, t_total):.0f}%)"
+    )
+    print(
+        f"  Buffer: {bsz:,}/{bcap:,} ({100.0 * bsz / bcap:.1f}%)  |  "
+        f"Env steps: {metrics.get('total_env_steps', 0):,}"
+    )
+    print("\n" + "=" * 70 + "\n")
 
 
 def _evaluate_agent_on_env(
@@ -825,8 +884,14 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
     all_metrics: list[dict[str, Any]] = []
     best_score = float("-inf")
     last: dict[str, Any] = {}
+    prev_metrics: Optional[dict[str, Any]] = None
+    prev_eval: Optional[dict[str, Any]] = None
+    running_gen_seconds = 0.0
     try:
         for gen in range(num_gen):
+            print("=" * 60)
+            print(f"Generation {gen + 1} | Starting loop phases: collect -> train -> validate -> evolve")
+            print("=" * 60)
             metrics = workflow.run_generation()
             if log_vram and should_log_gpu_memory_this_generation(vram_interval, gen):
                 log_gpu_memory_report(logger, f"after generation {gen + 1}/{num_gen}")
@@ -848,7 +913,13 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
                 num_gen=num_gen,
                 metrics=metrics,
                 progress_eval=progress_eval,
+                prev_metrics=prev_metrics,
+                prev_eval=prev_eval,
+                avg_gen_seconds=(running_gen_seconds / gen) if gen > 0 else None,
             )
+            running_gen_seconds += float(metrics.get("timing_total_s", 0.0))
+            prev_metrics = metrics
+            prev_eval = progress_eval
             if artifact_mgr is not None:
                 artifact_mgr.append_metric(metrics)
                 score = float(metrics.get("max_fitness", float("-inf")))

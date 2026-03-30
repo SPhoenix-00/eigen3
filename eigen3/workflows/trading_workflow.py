@@ -15,6 +15,7 @@ Key changes from the sequential version:
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import logging
+import time
 
 import chex
 import jax
@@ -591,6 +592,7 @@ class TradingERLWorkflow:
 
     def run_generation(self) -> Dict[str, Any]:
         """Run one generation of the GPU-vectorized ERL workflow."""
+        t_gen_start = time.perf_counter()
         self.key, gen_key = random.split(self.key)
 
         if self._stacked_params is None:
@@ -598,6 +600,7 @@ class TradingERLWorkflow:
             self._initialize_population(init_key)
 
         # Phase 1 — collect experience (vmapped)
+        t_collect_start = time.perf_counter()
         self.key, collect_key = random.split(self.key)
         self._env_states, self._replay_buffer, _, collect_reward = (
             self._collect_experience(
@@ -609,21 +612,27 @@ class TradingERLWorkflow:
             )
         )
         self.total_env_steps += self.config.steps_per_agent * self._pop_size
+        t_collect_s = time.perf_counter() - t_collect_start
 
         # Phase 2 — gradient updates (vmapped loss)
+        t_train_start = time.perf_counter()
         grad_metrics: Dict[str, float] = {}
         if self._replay_buffer.size >= self.config.batch_size:
             self.key, grad_key = random.split(self.key)
             self._stacked_params, grad_metrics = self._gradient_update(
                 self._stacked_params, self._replay_buffer, grad_key,
             )
+        t_train_s = time.perf_counter() - t_train_start
 
         # Phase 3 — evaluate population (vmapped)
+        t_eval_start = time.perf_counter()
         self.key, eval_key = random.split(self.key)
         fitness_scores = self._evaluate_population(self._stacked_params, eval_key)
         self._last_best_idx = int(jnp.argmax(fitness_scores))
+        t_eval_s = time.perf_counter() - t_eval_start
 
         # Phase 3b — Hall of Fame
+        t_hof_start = time.perf_counter()
         if self.hof is not None:
             population_list = unstack_params(self._stacked_params, self._pop_size)
             hof_candidates = [
@@ -653,8 +662,10 @@ class TradingERLWorkflow:
                     len(self.hof),
                     self.hof.get_stats()["best_score"],
                 )
+        t_hof_s = time.perf_counter() - t_hof_start
 
         # Phase 4 — selection + breeding
+        t_evolve_start = time.perf_counter()
         self.key, breed_key = random.split(self.key)
         self._stacked_params = self._breed_next_generation(
             self._stacked_params, fitness_scores, breed_key,
@@ -664,6 +675,8 @@ class TradingERLWorkflow:
 
         if self.hof is not None:
             self.hof.save()
+        t_evolve_s = time.perf_counter() - t_evolve_start
+        t_total_s = time.perf_counter() - t_gen_start
 
         metrics: Dict[str, Any] = {
             "generation": self.generation,
@@ -678,6 +691,14 @@ class TradingERLWorkflow:
             "buffer_capacity": int(self.config.replay_buffer_size),
             "collect_reward_total": float(collect_reward),
             "collect_reward_mean_per_agent": float(collect_reward) / float(self._pop_size),
+            "population_size": int(self._pop_size),
+            "positive_agents": int(jnp.sum(fitness_scores > 0.0)),
+            "timing_collect_s": float(t_collect_s),
+            "timing_train_s": float(t_train_s),
+            "timing_eval_s": float(t_eval_s),
+            "timing_hof_s": float(t_hof_s),
+            "timing_evolve_s": float(t_evolve_s),
+            "timing_total_s": float(t_total_s),
         }
         for k, v in grad_metrics.items():
             metrics[f"mean_{k}"] = v
