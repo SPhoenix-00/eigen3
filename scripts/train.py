@@ -1,5 +1,13 @@
 """Training script for Eigen3 trading system (Hydra entry point)."""
 
+import sys
+from pathlib import Path
+
+# Repo root on path: script dir is ``scripts/``, not the package parent.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import hydra
 from omegaconf import DictConfig
 
