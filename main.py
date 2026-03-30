@@ -31,7 +31,12 @@ def _parse_cli(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
 
 
 def _set_compat_env(stamp: str, verbose: bool, quiet: bool) -> Path:
-    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+    # Suppress low-level backend compiler spam in default user-facing runs.
+    # Keep raw backend logs available in verbose mode for debugging.
+    if not verbose:
+        os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+        os.environ.setdefault("ABSL_MIN_LOG_LEVEL", "3")
+        os.environ.setdefault("GLOG_minloglevel", "3")
     eval_dir = _REPO_ROOT / "evaluation_results"
     ckpt_dir = _REPO_ROOT / "checkpoints"
     log_dir = _REPO_ROOT / "logs"
