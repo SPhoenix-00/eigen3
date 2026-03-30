@@ -13,20 +13,22 @@
 #   5) local_replay_buffer_size — slightly smaller ring → faster turnover / fresher
 #      mix; frees a few GiB to pay for (1) and (3).
 #
-# If nvidia-smi peak > ~78 GiB, drop local_batch_size to 112 or training chunk to 12.
+# 128×16 loss vmap peaked ~70GiB (OOM on 80GiB). That is only slightly over budget;
+# we trim a bit from batch and vmap width instead of halving both (64×8 was overly safe).
+# If you still OOM: try batch 88 or chunk 10; if you have headroom: nudge batch toward 112.
 # ============================================================================
 
 defaults:
   - default
 
-# (1) Was 96. ~+33% batch mem vs 96; pair with (5) so net VRAM stays controlled.
-local_batch_size: 128
+# (1) Modest step down from 128 (~12% fewer activations per sample than 128×16).
+local_batch_size: 96
 
 # (2) Was 24. Pure extra work per gen; no larger replay tensor.
 gradient_steps_per_gen: 32
 
-# (3) Was 8. 6 chunks → 3 chunks over pop 48; monitor peak before 24 or 48.
-local_training_agent_batch_size: 16
+# (3) Between 8 and 16: 4 chunks × pop 48, lower peak than 16-wide vmap.
+local_training_agent_batch_size: 12
 
 # (4) Was 320. ~20% more on-policy data per gen before the same gradient block.
 steps_per_agent: 384

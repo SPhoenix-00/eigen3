@@ -260,6 +260,9 @@ def run_chunked_vmap_loss(
         sub_p = jax.tree.map(lambda x: x[start:end], stacked_params)
         sub_k = loss_keys[start:end]
         L = vmap_loss(sub_p, batch, sub_k)
+        # Finish this chunk before the next so XLA peak stays at one chunk width
+        # (large actor/critic + wide batch can OOM a single kernel otherwise).
+        L = jax.tree.map(jax.block_until_ready, L)
         parts_a.append(L["actor_loss"])
         parts_c.append(L["critic_loss"])
         parts_q.append(L["mean_q"])
