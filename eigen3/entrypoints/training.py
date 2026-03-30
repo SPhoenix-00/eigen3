@@ -285,7 +285,7 @@ def _print_generation_summary(
         ("Init", float(metrics.get("timing_init_s", 0.0))),
         ("Collect", float(metrics.get("timing_collect_s", 0.0))),
         ("Train", float(metrics.get("timing_train_s", 0.0))),
-        ("Eval", float(metrics.get("timing_eval_s", 0.0))),
+        ("Val", float(metrics.get("timing_val_s", 0.0))),
         ("Stats", float(metrics.get("timing_stats_s", 0.0))),
         ("HoF", float(metrics.get("timing_hof_s", 0.0))),
         ("Evolve", float(metrics.get("timing_evolve_s", 0.0))),
@@ -401,7 +401,7 @@ def _build_eval_payload_from_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     Replaces the sequential ``_evaluate_agent_on_env`` call with data already
     captured during the batched population evaluation.
     """
-    episodes = metrics.get("best_agent_eval_episodes", [])
+    episodes = metrics.get("best_agent_val_episodes", [])
     if not episodes:
         return {"num_episodes": 0, "episodes": []}
     rewards = np.asarray([e["total_reward"] for e in episodes], dtype=np.float64)
@@ -582,7 +582,7 @@ def build_trading_workflow_config(cfg: DictConfig) -> TradingWorkflowConfig:
         ),
         batch_size=_effective_workflow_batch_size(cfg),
         replay_buffer_size=_effective_replay_buffer_size(cfg),
-        eval_episodes=int(OmegaConf.select(cfg, "population.eval_episodes", default=5)),
+        val_episodes=int(OmegaConf.select(cfg, "population.val_episodes", default=5)),
         conservative_k=int(OmegaConf.select(cfg, "population.conservative_k", default=3)),
         target_update_period=target_update_period,
         steps_per_agent=steps_per_agent,
@@ -839,7 +839,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         evaluator,
         config=wf_cfg,
         seed=int(cfg.seed),
-        eval_env=val_env,
+        val_env=val_env,
         hall_of_fame=hof,
     )
 

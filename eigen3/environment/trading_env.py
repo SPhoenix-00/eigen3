@@ -503,8 +503,12 @@ class TradingEnv(Env):
     ) -> chex.Array:
         """Per-episode reward: agent PnL vs buy-and-hold benchmark.
 
-        The benchmark assumes the peak capital employed during the episode was
-        invested equally across all investable stocks at episode start.
+        When the agent deployed capital, the benchmark is peak capital employed
+        times the equal-weight average return from episode start to the
+        terminal row. When peak capital is zero (idle episode), coefficient 1
+        means one share per investable name bought at the episode start price:
+        benchmark dollar PnL is the sum of ``end - start`` per stock (mono:
+        one share of that stock).
         """
         start_step = env_state.start_step
         current_step = env_state.current_step
@@ -531,7 +535,9 @@ class TradingEnv(Env):
         n_valid = jnp.maximum(jnp.sum(valid.astype(jnp.float32)), 1.0)
         avg_return = jnp.sum(returns) / n_valid
 
-        benchmark_pnl = peak_capital * avg_return
+        active_bnh = peak_capital * avg_return
+        idle_bnh = jnp.sum(jnp.where(valid, end_prices - start_prices, 0.0))
+        benchmark_pnl = jnp.where(peak_capital > 0, active_bnh, idle_bnh)
         return (total_pnl - benchmark_pnl) * self.episode_reward_multiplier
 
     def episode_buyhold_excess_usd(self, state: EnvState) -> jnp.ndarray:

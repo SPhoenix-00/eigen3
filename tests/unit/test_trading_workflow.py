@@ -69,7 +69,7 @@ def create_test_workflow(pop_size=4):
         gradient_steps_per_gen=5,
         batch_size=16,
         replay_buffer_size=1000,
-        eval_episodes=2,
+        val_episodes=2,
         steps_per_agent=10,
     )
 
@@ -381,7 +381,7 @@ class TestWorkflowDeterminism:
             gradient_steps_per_gen=5,
             batch_size=16,
             replay_buffer_size=1000,
-            eval_episodes=2,
+            val_episodes=2,
         )
 
         workflow1 = TradingERLWorkflow(env, agent, evaluator, config, seed=0)

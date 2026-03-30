@@ -169,7 +169,7 @@ class TradingWorkflowConfig:
         batch_size: Batch size for gradient updates
         replay_buffer_size: Maximum size of replay buffer
         warmup_steps: Number of random exploration steps before training
-        eval_episodes: Number of episodes to evaluate each agent
+        val_episodes: Number of validation episodes per agent per generation
         target_update_period: How often to update target networks (in gradient steps)
         steps_per_agent: Environment steps collected per agent per generation
         gradient_vmap_chunk_size: If set and ``< population_size``, run loss ``vmap`` in
@@ -187,8 +187,8 @@ class TradingWorkflowConfig:
     batch_size: int = 32
     replay_buffer_size: int = 100000
     warmup_steps: int = 1000
-    eval_episodes: int = 5
-    conservative_k: int = 3
+    val_episodes: int = 2
+    conservative_k: int = 1
     target_update_period: int = 10
     steps_per_agent: int = 100
     gradient_vmap_chunk_size: Optional[int] = None
@@ -220,11 +220,11 @@ class TradingERLWorkflow:
         evaluator: Evaluator,
         config: TradingWorkflowConfig,
         seed: int = 0,
-        eval_env: Optional[Env] = None,
+        val_env: Optional[Env] = None,
         hall_of_fame: Optional[HallOfFame] = None,
     ):
         self.env = env
-        self.eval_env = eval_env if eval_env is not None else env
+        self.val_env = val_env if val_env is not None else env
         self.agent = agent
         self.evaluator = evaluator
         self.config = config
@@ -254,7 +254,7 @@ class TradingERLWorkflow:
         as constants by JAX's tracer — only the array arguments are traced.
         """
         env = self.env
-        eval_env = self.eval_env
+        val_env = self.val_env
         agent = self.agent
 
         def _compute_action_one(params, obs, key):
@@ -277,8 +277,8 @@ class TradingERLWorkflow:
         self._vmap_loss = jax.jit(jax.vmap(_loss_one, in_axes=(0, None, 0)))
 
         self._vmap_env_reset = jax.jit(jax.vmap(env.reset))
-        self._vmap_eval_step = jax.jit(jax.vmap(lambda s, a: eval_env.step(s, a)))
-        self._vmap_eval_reset = jax.jit(jax.vmap(eval_env.reset))
+        self._vmap_val_step = jax.jit(jax.vmap(lambda s, a: val_env.step(s, a)))
+        self._vmap_val_reset = jax.jit(jax.vmap(val_env.reset))
 
         pop_size_int = int(self._pop_size)
 
@@ -478,12 +478,12 @@ class TradingERLWorkflow:
     # Phase 3 — Evaluation (vmapped)
     # ------------------------------------------------------------------
 
-    def _evaluate_population(
+    def _validate_population(
         self,
         stacked_params: TradingNetworkParams,
         key: chex.PRNGKey,
     ) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, Dict[str, chex.Array]]:
-        """Evaluate all agents in parallel.
+        """Validate all agents in parallel on held-out data.
 
         Returns:
             Tuple of ``(fitness, mean_bh_excess_usd, mean_total_gain_pct,
@@ -492,16 +492,17 @@ class TradingERLWorkflow:
             ``[n_episodes, pop_size]`` matrices with full episode detail
             (rewards, PnL, trades, win/loss counts, etc.).
             Fitness is the mean of the ``conservative_k`` lowest episode total
-            rewards.  Buy-hold excess, gain %, and PnL are means over eval
-            episodes (captured at first ``done`` per episode).  Mean/min episode
-            reward are taken over eval episodes (not the bottom-k fitness slice).
+            rewards.  Buy-hold excess, gain %, and PnL are means over
+            validation episodes (captured at first ``done`` per episode).
+            Mean/min episode reward are taken over validation episodes
+            (not the bottom-k fitness slice).
         """
         pop_size = self._pop_size
-        # At least one eval episode (0 would make jnp.stack fail).
-        n_episodes = max(1, int(self.config.eval_episodes))
+        # At least one validation episode (0 would make jnp.stack fail).
+        n_episodes = max(1, int(self.config.val_episodes))
         # Calendar episodes must run until ``done`` or totals stay ~0 (no terminal bonus).
         # ``episode_length`` is the max row-span from TradingEnv's schedule; keep slack.
-        _ep_len = getattr(self.eval_env, "episode_length", None)
+        _ep_len = getattr(self.val_env, "episode_length", None)
         _slack = 128
         if _ep_len is not None:
             try:
@@ -524,13 +525,13 @@ class TradingERLWorkflow:
         all_ep_max_coeff: list[chex.Array] = []
 
         vmap_excess = None
-        if hasattr(self.eval_env, "episode_buyhold_excess_usd"):
-            vmap_excess = jax.vmap(self.eval_env.episode_buyhold_excess_usd)
+        if hasattr(self.val_env, "episode_buyhold_excess_usd"):
+            vmap_excess = jax.vmap(self.val_env.episode_buyhold_excess_usd)
 
         for ep in range(n_episodes):
             key, ep_key = random.split(key)
             reset_keys = random.split(ep_key, pop_size)
-            env_states = self._vmap_eval_reset(reset_keys)
+            env_states = self._vmap_val_reset(reset_keys)
 
             ep_rewards = jnp.zeros(pop_size)
             done_mask = jnp.zeros(pop_size, dtype=jnp.bool_)
@@ -553,7 +554,7 @@ class TradingERLWorkflow:
                 all_actions = self._vmap_eval_actions(
                     stacked_params, env_states.obs, action_keys,
                 )
-                next_states = self._vmap_eval_step(env_states, all_actions)
+                next_states = self._vmap_val_step(env_states, all_actions)
 
                 step_coeff = jnp.max(all_actions[:, :, 0], axis=-1)
                 ep_max_coeff = jnp.where(
@@ -769,15 +770,15 @@ class TradingERLWorkflow:
         t_train_s = time.perf_counter() - t_train_start
         print(f" {t_train_s:.1f}s", flush=True)
 
-        # Phase 3 — evaluate population (vmapped)
-        print("  > Eval...", end="", flush=True)
-        t_eval_start = time.perf_counter()
-        self.key, eval_key = random.split(self.key)
+        # Phase 3 — validate population (vmapped on held-out data)
+        print("  > Val...", end="", flush=True)
+        t_val_start = time.perf_counter()
+        self.key, val_key = random.split(self.key)
         fitness_scores, bh_excess, gain_pct, pnl_mean_arr, reward_mean_arr, reward_min_arr, per_episode = (
-            self._evaluate_population(self._stacked_params, eval_key)
+            self._validate_population(self._stacked_params, val_key)
         )
-        t_eval_s = time.perf_counter() - t_eval_start
-        print(f" {t_eval_s:.1f}s", flush=True)
+        t_val_s = time.perf_counter() - t_val_start
+        print(f" {t_val_s:.1f}s", flush=True)
 
         # One host copy for stats + HoF; avoid float(fitness_scores[i]) per agent (N syncs).
         t_stats_start = time.perf_counter()
@@ -804,10 +805,10 @@ class TradingERLWorkflow:
         _wr_per_ep = per_ep_np["num_wins"] / np.maximum(per_ep_np["num_trades"], 1)
         win_rate_np = np.mean(_wr_per_ep, axis=0)  # [pop_size]
 
-        n_eval_eps = per_ep_np["rewards"].shape[0]
+        n_val_eps = per_ep_np["rewards"].shape[0]
         best_episodes: List[Dict[str, Any]] = []
         bi = self._last_best_idx
-        for ep_i in range(n_eval_eps):
+        for ep_i in range(n_val_eps):
             nt = int(per_ep_np["num_trades"][ep_i, bi])
             nw = int(per_ep_np["num_wins"][ep_i, bi])
             best_episodes.append({
@@ -901,11 +902,11 @@ class TradingERLWorkflow:
             "top5_pnl": [float(pnl_np[i]) for i in top5_indices],
             "top5_bh_excess_usd": [float(bh_np[i]) for i in top5_indices],
             "top5_win_rate": [float(win_rate_np[i]) for i in top5_indices],
-            "best_agent_eval_episodes": best_episodes,
+            "best_agent_val_episodes": best_episodes,
             "timing_init_s": float(t_init_s),
             "timing_collect_s": float(t_collect_s),
             "timing_train_s": float(t_train_s),
-            "timing_eval_s": float(t_eval_s),
+            "timing_val_s": float(t_val_s),
             "timing_stats_s": float(t_stats_s),
             "timing_hof_s": float(t_hof_s),
             "timing_evolve_s": float(t_evolve_s),
@@ -955,7 +956,7 @@ class TradingERLWorkflow:
             raise ValueError("Population not initialized. Run at least one generation first.")
 
         self.key, eval_key = random.split(self.key)
-        fitness, _, _, _, _, _, _ = self._evaluate_population(self._stacked_params, eval_key)
+        fitness, _, _, _, _, _, _ = self._validate_population(self._stacked_params, eval_key)
         best_idx = int(jnp.argmax(fitness))
 
         return jax.tree.map(lambda x: x[best_idx], self._stacked_params)
@@ -971,7 +972,7 @@ def create_trading_workflow(
     evaluator: Evaluator,
     config: Optional[TradingWorkflowConfig] = None,
     seed: int = 0,
-    eval_env: Optional[Env] = None,
+    val_env: Optional[Env] = None,
     hall_of_fame: Optional[HallOfFame] = None,
 ) -> TradingERLWorkflow:
     """Convenience function to create a trading ERL workflow."""
@@ -984,6 +985,6 @@ def create_trading_workflow(
         evaluator=evaluator,
         config=config,
         seed=seed,
-        eval_env=eval_env,
+        val_env=val_env,
         hall_of_fame=hall_of_fame,
     )
