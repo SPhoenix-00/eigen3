@@ -262,6 +262,7 @@ def _print_generation_summary(
     prev_metrics: Optional[dict[str, Any]] = None,
     prev_eval: Optional[dict[str, Any]] = None,
     avg_gen_seconds: Optional[float] = None,
+    top5_evals: Optional[list] = None,
 ) -> None:
     def _delta(curr: float, prev: Optional[float], suffix: str = "") -> str:
         if prev is None:
@@ -300,25 +301,6 @@ def _print_generation_summary(
     print("\n" + "=" * 70)
     print(f"  Gen {gen}/{num_gen} | {_fmt_time(t_total)} | ETA {_fmt_time(eta_s)}")
     print("=" * 70)
-    print("\n  BEST AGENT")
-    print("  -------------------------------------------------------")
-    print(
-        f"  Fitness: {metrics.get('best_agent_fitness', 0.0):9.2f}"
-        f"{_delta(float(metrics.get('best_agent_fitness', 0.0)), float(prev_metrics.get('best_agent_fitness')) if prev_metrics else None)}"
-    )
-    print(
-        f"  ROI:     {progress_eval.get('gain_pct_mean', 0.0):9.2f}%"
-        f"{_delta(float(progress_eval.get('gain_pct_mean', 0.0)), float(prev_eval.get('gain_pct_mean')) if prev_eval else None, '%')}"
-    )
-    print(
-        f"  WinRate: {100.0 * progress_eval.get('win_rate_mean', 0.0):9.1f}%"
-        f"{_delta(100.0 * float(progress_eval.get('win_rate_mean', 0.0)), 100.0 * float(prev_eval.get('win_rate_mean')) if prev_eval else None, '%')}"
-    )
-    print(
-        f"  PnL:     {progress_eval.get('pnl_mean', 0.0):9.2f}"
-        f"{_delta(float(progress_eval.get('pnl_mean', 0.0)), float(prev_eval.get('pnl_mean')) if prev_eval else None)}"
-    )
-    print(f"  Trades:  {progress_eval.get('num_trades_mean', 0.0):9.1f}")
     print("\n  POPULATION")
     print("  -------------------------------------------------------")
     positive = int(metrics.get("positive_agents", 0))
@@ -334,6 +316,19 @@ def _print_generation_summary(
         f"critic={metrics.get('mean_critic_loss', float('nan')):.4f}  "
         f"q={metrics.get('mean_mean_q', float('nan')):.4f}"
     )
+    print("\n--- Validation Summary ---")
+    print("Top 5 by Fitness:")
+    if top5_evals:
+        for rank, (idx, fitness, ev) in enumerate(top5_evals, 1):
+            roi = ev.get('gain_pct_mean', 0.0)
+            pnl = ev.get('pnl_mean', 0.0)
+            wr = ev.get('win_rate_mean', 0.0) * 100.0
+            r_mean = ev.get('reward_mean', 0.0)
+            r_min = ev.get('reward_min', 0.0)
+            print(f"  {rank}. Agent {idx:2d}: Fitness={fitness:8.2f}, Val=[mean:{r_mean:6.2f}, min:{r_min:6.2f}], ROI={roi:6.2f}%, PnL=${pnl:8.2f}, WR={wr:5.1f}%")
+    else:
+        print("  (No Top 5 stats available)")
+
     if "hof_size" in metrics:
         print("\n  HALL OF FAME")
         print("  -------------------------------------------------------")
@@ -482,65 +477,49 @@ def _effective_replay_buffer_size(cfg: DictConfig) -> int:
 
 
 def run_config_summary(cfg: DictConfig) -> str:
-    """Compact startup summary for the console."""
-
-    def S(key: str, default=None):
-        return OmegaConf.select(cfg, key, default=default)
-
+    """Detailed Eigen2-style startup summary for the console."""
     lines: list[str] = [
         "",
-        "-------- Run --------",
-        f"  experiment: {S('experiment_name', '?')!s}   run: {S('run_name', '?')!s}",
-        f"  seed: {S('seed', '?')!s}   device: {S('device', '?')!s}   "
-        f"jit: {S('enable_jit', True)!s}   pmap: {S('enable_pmap', False)!s}",
+        "============================================================",
+        "Project Eigen 3 Configuration (Full)",
+        "============================================================",
     ]
+    
+    def _flatten_dict(d: dict, parent_key: str = "") -> dict:
+        items = []
+        for k, v in d.items():
+            new_key = f"{parent_key}.{k}" if parent_key else k
+            if isinstance(v, dict) and v:
+                items.extend(_flatten_dict(v, new_key).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)
+
+    try:
+        cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+    except Exception:
+        cfg_dict = OmegaConf.to_container(cfg, resolve=False)
+        
+    flat_cfg = _flatten_dict(cfg_dict)
+    
+    # Custom additions that were calculated in the original logic
     try:
         from hydra.core.hydra_config import HydraConfig
-
-        out = HydraConfig.get().runtime.output_dir
-        lines.append(f"  hydra output: {out}")
+        flat_cfg["hydra_output_dir"] = HydraConfig.get().runtime.output_dir
     except Exception:
         pass
 
-    lines.extend(
-        [
-            "-------- Env --------",
-            f"  data_path: {S('env.data_path', '?')!s}",
-            f"  context: {S('env.context_window_days', '?')!s} d   "
-            f"trading: {S('env.trading_period_days', '?')!s} d   "
-            f"settlement: {S('env.settlement_period_days', 0)!s} d",
-            f"  val_reserve: x{S('env.validation_reserve_multiplier', '?')!s}   "
-            f"columns: {S('env.num_columns', '?')!s}   "
-            f"F_obs: {S('env.num_features_obs', '?')!s}   "
-            f"investable: {S('env.num_investable_stocks', '?')!s}",
-            "-------- Agent -------",
-            f"  workflow: {_short_class(S('agent.workflow_cls'))}",
-            f"  actor_lr: {S('agent.optimizer.actor_lr', '?')!s}   "
-            f"critic_lr: {S('agent.optimizer.critic_lr', '?')!s}   "
-            f"mixed_precision: {S('agent.use_mixed_precision', False)!s}",
-            "-------- Population --",
-            f"  pop_size: {S('population.pop_size', '?')!s}   "
-            f"generations: {S('population.total_generations', '?')!s}   "
-            f"batch: {_effective_workflow_batch_size(cfg)}",
-            f"  replay: {_effective_replay_buffer_size(cfg)}   "
-            f"grad_steps/gen: {S('population.gradient_steps_per_gen', '?')!s}   "
-            f"eval_episodes: {S('population.eval_episodes', '?')!s}",
-            f"  steps_per_agent/gen: {S('population.steps_per_agent', '?')!s}",
-            f"  loss_vmap_chunk: {_effective_gradient_vmap_chunk_size(cfg) or 'full'}",
-            f"  gauntlet: {S('population.gauntlet_enabled', '?')!s}",
-            f"  save_checkpoints: {S('population.save_checkpoints', True)!s}",
-            "-------- Logging -----",
-            f"  console: {S('logging.console_log_level', 'INFO')!s}   "
-            f"tensorboard: {S('logging.use_tensorboard', False)!s}   "
-            f"wandb: {S('logging.wandb_project', '?')!s} "
-            f"({S('logging.wandb_mode', '?')!s})",
-            f"  gpu_memory: {S('logging.log_gpu_memory', True)!s}   "
-            f"every_n_gen: {S('logging.log_gpu_memory_every_n_generations', 0)!s}",
-            "----------------------",
-            "  Full config: Hydra run dir -> .hydra/config.yaml (+ overrides.yaml).",
-            "",
-        ]
-    )
+    flat_cfg["effective_batch_size"] = _effective_workflow_batch_size(cfg)
+    flat_cfg["effective_replay_buffer_size"] = _effective_replay_buffer_size(cfg)
+    flat_cfg["loss_vmap_chunk"] = _effective_gradient_vmap_chunk_size(cfg) or "full"
+
+    for k, v in flat_cfg.items():
+        k_str = str(k).upper()
+        v_str = str(v)
+        lines.append(f"{k_str:.<40} {v_str}")
+        
+    lines.append("============================================================")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -645,6 +624,12 @@ def run_training(cfg: DictConfig) -> List[dict[str, Any]]:
 
 def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
     compat_mode = _compat_mode_enabled()
+    if compat_mode:
+        # Reconfigure root logger to remove prefix formatting for a clean Eigen2-style output
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers:
+            handler.setFormatter(logging.Formatter("%(message)s"))
+
     tee_active = os.environ.get(TEE_ENV_VAR)
     if tee_active:
         logger.info("Mirroring console to %s", tee_active)
@@ -720,24 +705,20 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         settlement_period_days=settlement,
         validation_reserve_multiplier=val_mult,
     )
-    logger.info(
-        "Split: train rows [0, %s), val trading band [%s, %s), "
-        "val env rows [%s, %s) (context may use [%s, %s)), "
-        "holdout trading [%s, %s), holdout env [%s, %s) "
-        "(final episode start index: %s)",
-        split.train_end,
-        split.val_start,
-        split.val_end,
-        split.val_env_start,
-        split.val_end,
-        split.val_env_start,
-        split.val_start,
-        split.holdout_start,
-        split.holdout_end,
-        split.holdout_env_start,
-        split.holdout_end,
-        split.last_episode_start,
-    )
+    
+    split_info = [
+        "",
+        "Data Split (Three-Tier Strategy):",
+        f"  Total days: {num_days}",
+        f"  Training indices:   [0, {split.train_end})",
+        f"  Validation indices: [{split.val_env_start}, {split.val_end})",
+        f"  Holdout indices:    [{split.holdout_env_start}, {split.holdout_end})",
+        "",
+        "  [!] CRITICAL: Holdout data is NEVER used during training!",
+        "             It is reserved EXCLUSIVELY for committee testing.",
+        ""
+    ]
+    logger.info("\n".join(split_info))
 
     train_obs, train_full, dates_train = slice_trading_timeline(
         data_array, data_array_full, dates_np, 0, split.train_end
@@ -889,25 +870,41 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
     running_gen_seconds = 0.0
     try:
         for gen in range(num_gen):
-            print("=" * 60)
-            print(f"Generation {gen + 1} | Starting loop phases: collect -> train -> validate -> evolve")
-            print("=" * 60)
+            buffer_size = 0 if workflow._replay_buffer is None else int(workflow._replay_buffer.size)
+            buffer_cap = workflow.config.replay_buffer_size
+            pct = 100.0 * buffer_size / buffer_cap if buffer_cap > 0 else 0.0
+            print("\n============================================================")
+            print(f"Generation {gen + 1} | Runway: {num_gen - gen}")
+            print(f"Buffer: {buffer_size:,} / {buffer_cap:,} ({pct:.1f}%)")
+            print("============================================================")
+            
             metrics = workflow.run_generation()
             if log_vram and should_log_gpu_memory_this_generation(vram_interval, gen):
                 log_gpu_memory_report(logger, f"after generation {gen + 1}/{num_gen}")
             all_metrics.append(metrics)
-            best_params_for_progress = workflow.get_last_best_agent()
+            
+            top5_evals = []
             logger.info(
-                "Validation rollout for progress (%d episode(s), best-of-gen agent)...",
+                "\nValidation rollout for Top 5 agents (%d episode(s))...",
                 max(1, progress_eval_episodes),
             )
-            progress_eval = _evaluate_agent_on_env(
-                env=val_env,
-                agent=agent,
-                params=best_params_for_progress,
-                seed=int(cfg.seed) + gen + 500_000,
-                num_episodes=max(1, progress_eval_episodes),
-            )
+            import sys
+            sys.stdout.flush()
+            
+            for rank, idx in enumerate(metrics.get("top5_indices", [])):
+                agent_params = jax.tree.map(lambda x: x[idx], workflow._stacked_params)
+                ev = _evaluate_agent_on_env(
+                    env=val_env,
+                    agent=agent,
+                    params=agent_params,
+                    seed=int(cfg.seed) + gen + 500_000 + rank,
+                    num_episodes=max(1, progress_eval_episodes),
+                )
+                top5_evals.append((idx, metrics["top5_fitness"][rank], ev))
+                
+            progress_eval = top5_evals[0][2] if top5_evals else {}
+            best_params_for_progress = jax.tree.map(lambda x: x[metrics["top5_indices"][0]], workflow._stacked_params) if top5_evals else workflow.get_last_best_agent()
+            
             _print_generation_summary(
                 gen=gen + 1,
                 num_gen=num_gen,
@@ -916,6 +913,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
                 prev_metrics=prev_metrics,
                 prev_eval=prev_eval,
                 avg_gen_seconds=(running_gen_seconds / gen) if gen > 0 else None,
+                top5_evals=top5_evals,
             )
             running_gen_seconds += float(metrics.get("timing_total_s", 0.0))
             prev_metrics = metrics
@@ -928,9 +926,10 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
                     best_params = best_params_for_progress
                     if save_checkpoints:
                         logger.info(
-                            "New best (gen=%s); saving checkpoint and artifact eval...",
-                            metrics.get("generation", gen + 1),
+                            "✓ New best! Agent %d with Fitness: %.2f",
+                            metrics.get("best_agent_idx", -1), score
                         )
+                        logger.info("  Saving checkpoint with new best agent...")
                         best_path = artifact_mgr.save_best_agent(
                             best_params,
                             generation=int(metrics.get("generation", gen + 1)),
@@ -939,7 +938,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
                         _art_eps = min(
                             3, int(OmegaConf.select(cfg, "population.eval_episodes", default=5))
                         )
-                        logger.info("Artifact validation rollouts (%d episode(s))...", _art_eps)
+                        logger.info("  Artifact validation rollouts (%d episode(s))...", _art_eps)
                         eval_payload = _evaluate_agent_on_env(
                             env=val_env,
                             agent=agent,
@@ -951,10 +950,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
                         eval_payload["generation"] = int(metrics.get("generation", gen + 1))
                         eval_paths = artifact_mgr.write_evaluation_bundle(eval_payload)
                         logger.info(
-                            "New best (gen=%s score=%.6f) saved to %s | eval: %s",
-                            metrics.get("generation", gen + 1),
-                            score,
-                            best_path,
+                            "✓ Saved & syncing to cloud | eval: %s",
                             eval_paths["json"],
                         )
                     else:

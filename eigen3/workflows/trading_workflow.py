@@ -270,13 +270,11 @@ class TradingERLWorkflow:
             state = AgentState(params=params)
             return agent.loss(state, sample_batch, key)
 
-        self._vmap_compute_actions = jax.jit(jax.vmap(_compute_action_one))
         self._vmap_eval_actions = jax.jit(jax.vmap(_eval_action_one))
 
         # in_axes=(0, None, 0): params per-agent, batch shared, key per-agent
         self._vmap_loss = jax.jit(jax.vmap(_loss_one, in_axes=(0, None, 0)))
 
-        self._vmap_env_step = jax.jit(jax.vmap(lambda s, a: env.step(s, a)))
         self._vmap_env_reset = jax.jit(jax.vmap(env.reset))
         self._vmap_eval_step = jax.jit(jax.vmap(lambda s, a: eval_env.step(s, a)))
         self._vmap_eval_reset = jax.jit(jax.vmap(eval_env.reset))
