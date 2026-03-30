@@ -27,6 +27,7 @@ All notable changes to Eigen3 are documented here.
 
 ### Changed
 
+- **Logging defaults**: **`configs/logging/default.yaml`** sets **`use_wandb: false`** and **`wandb_mode: disabled`** until W&B is wired into the training loop.
 - **`scripts/train.py`**: Thin Hydra entry point; delegates to `eigen3.entrypoints.training.run_training(cfg)`.
 - **Run summary logging**: ASCII-only section headers in `run_config_summary` for Windows consoles (cp1252).
 - **Reward shaping defaults**: Hurdle rate **0.5%** (`hurdle_rate: 0.005`), **linear** coefficient scaling (`conviction_scaling_power: 1.0`), loss penalty multiplier **1.25** (`loss_penalty_multiplier: 1.25`), applied via **`eigen3/config.py`** and **`configs/env/*.yaml`** (replacing prior 0.6% hurdle, power 1.25, multiplier 1.0).

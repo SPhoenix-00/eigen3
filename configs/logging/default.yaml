@@ -13,8 +13,9 @@ file_log_level: "DEBUG"
 use_tensorboard: true
 tensorboard_log_dir: "${log_dir}/tensorboard/${run_name}"
 
-# Weights & Biases (WandB)
-use_wandb: true
+# Weights & Biases (WandB) — off by default until training logs to wandb.
+# Re-enable: use_wandb=true and wandb_mode=online (or offline), then wandb login.
+use_wandb: false
 wandb_project: "eigen3-trading"
 wandb_entity: null  # Set to your WandB username/team
 wandb_run_name: "${run_name}"
@@ -23,7 +24,7 @@ wandb_tags:
   - "trading"
   - "jax"
 wandb_notes: "JAX-based ERL for stock trading"
-wandb_mode: "online"  # "online", "offline", or "disabled"
+wandb_mode: "disabled"  # "online", "offline", or "disabled"
 
 # Logging intervals
 log_interval: 1  # Log metrics every N generations
