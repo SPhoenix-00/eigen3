@@ -19,7 +19,7 @@ import logging
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -282,6 +282,29 @@ class HallOfFame:
             _save_params(params, self._agent_path(new_id))
 
         return True
+
+    def remove_entries_by_agent_ids(self, agent_ids: Iterable[int]) -> List[int]:
+        """Remove HoF entries whose ``agent_id`` is in *agent_ids*.
+
+        Deletes corresponding msgpack files from disk. Does not renumber ids.
+        Returns the list of agent ids that were removed (may be shorter than
+        *agent_ids* if some ids were not present).
+        """
+        want: Set[int] = set(agent_ids)
+        if not want:
+            return []
+
+        removed: List[int] = []
+        kept: List[HallOfFameEntry] = []
+        for entry in self.entries:
+            if entry.agent_id in want:
+                removed.append(entry.agent_id)
+                if self.hof_dir:
+                    _safe_unlink(self._agent_path(entry.agent_id))
+            else:
+                kept.append(entry)
+        self.entries = kept
+        return removed
 
     # ------------------------------------------------------------------
     # Batch update (Eigen2 ``update_from_generation``)

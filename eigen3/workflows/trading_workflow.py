@@ -367,6 +367,9 @@ class TradingERLWorkflow:
         self.hof = hall_of_fame
 
         self._printed_train_compile_hint = False
+        # Terminal BnH in rewards: see run_generation (4/5 top-by-fitness with BnH>0 for 2 gens → unlock).
+        self._allow_negative_bnh_terminal_next_gen: bool = False
+        self._bnh_quorum_streak: int = 0  # consecutive gens meeting top-5 BnH quorum
         _maybe_enable_jax_compile_logging()
         self._build_vmapped_fns()
 
@@ -430,6 +433,7 @@ class TradingERLWorkflow:
             bnh_multiplier: chex.Array,
             loss_penalty_multiplier: chex.Array,
             action_bonus: chex.Array,
+            bnh_clamp_negative_terminal: chex.Array,
         ):
             """Single compiled rollout: vmap over agents × ``fori_loop`` over time steps.
 
@@ -476,6 +480,15 @@ class TradingERLWorkflow:
                     0.0,
                 )
                 next_states = next_states.replace(reward=next_states.reward + bnh_adj)
+                # Optional: terminal BnH in reward is only non-negative (scaled) unless unlocked.
+                full_bnh = excess * collect_erp * bnh_multiplier
+                clip_bnh = jnp.maximum(excess, 0.0) * collect_erp * bnh_multiplier
+                crimp = jnp.where(
+                    bnh_clamp_negative_terminal & next_states.done,
+                    clip_bnh - full_bnh,
+                    0.0,
+                )
+                next_states = next_states.replace(reward=next_states.reward + crimp)
                 buf = buffer_insert_batch(
                     buf,
                     obs=env_states.obs,
@@ -577,6 +590,7 @@ class TradingERLWorkflow:
         bnh_multiplier: float,
         loss_penalty_multiplier: float,
         action_bonus: float,
+        bnh_clamp_negative_terminal: bool,
     ) -> Tuple[Any, ReplayBufferState, chex.PRNGKey, chex.Array]:
         """Collect ``num_steps`` transitions for ALL agents in parallel.
 
@@ -593,6 +607,7 @@ class TradingERLWorkflow:
             jnp.asarray(bnh_multiplier, dtype=jnp.float32),
             jnp.asarray(loss_penalty_multiplier, dtype=jnp.float32),
             jnp.asarray(action_bonus, dtype=jnp.float32),
+            jnp.asarray(bnh_clamp_negative_terminal, dtype=jnp.bool_),
         )
         return env_states, buf, key, total_reward
 
@@ -669,6 +684,7 @@ class TradingERLWorkflow:
         bnh_multiplier: float = 1.0,
         loss_penalty_multiplier: Optional[float] = None,
         action_bonus: float = 0.0,
+        bnh_clamp_negative_terminal: bool = True,
     ) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, Dict[str, chex.Array]]:
         """Validate all agents in parallel on held-out data.
 
@@ -721,6 +737,9 @@ class TradingERLWorkflow:
         if loss_penalty_multiplier is None:
             loss_penalty_multiplier = getattr(self.val_env, "loss_penalty_multiplier", 1.25)
 
+        val_erp_j = jnp.asarray(val_erp, dtype=jnp.float32)
+        bnh_m_j = jnp.asarray(bnh_multiplier, dtype=jnp.float32)
+
         for ep in range(n_episodes):
             key, ep_key = random.split(key)
             reset_keys = random.split(ep_key, pop_size)
@@ -760,8 +779,8 @@ class TradingERLWorkflow:
                 )
                 next_states = self._vmap_val_step(env_states, all_actions)
 
+                excess = next_states.env_state.episode_benchmark_excess
                 if bnh_multiplier != 1.0:
-                    excess = next_states.env_state.episode_benchmark_excess
                     bnh_adj = jnp.where(
                         next_states.done,
                         excess * val_erp * (bnh_multiplier - 1.0),
@@ -769,6 +788,14 @@ class TradingERLWorkflow:
                     )
                     next_states = next_states.replace(
                         reward=next_states.reward + bnh_adj,
+                    )
+                if bnh_clamp_negative_terminal:
+                    excess = next_states.env_state.episode_benchmark_excess
+                    full_bnh = excess * val_erp_j * bnh_m_j
+                    clip_bnh = jnp.maximum(excess, 0.0) * val_erp_j * bnh_m_j
+                    next_states = next_states.replace(
+                        reward=next_states.reward
+                        + jnp.where(next_states.done, clip_bnh - full_bnh, 0.0),
                     )
 
                 step_coeff = jnp.max(all_actions[:, :, 0], axis=-1)
@@ -951,6 +978,10 @@ class TradingERLWorkflow:
         if not hasattr(self, "_forced_exploration_ended_gen"):
             self._forced_exploration_ended_gen = -1
 
+        # Terminal BnH in rewards: clamp negative excess to 0 unless the unlock gate is on
+        # (≥4 of top-5-by-fitness with mean BnH excess > 0 for two consecutive generations).
+        bnh_clamp_negative_terminal = not self._allow_negative_bnh_terminal_next_gen
+
         # Phase 1 — collect experience (vmapped)
         buffer_pct = 0.0
         if self._replay_buffer is not None:
@@ -962,7 +993,12 @@ class TradingERLWorkflow:
         base_loss_multiplier = float(getattr(self.env, "loss_penalty_multiplier", 1.25))
 
         if is_forced_explore:
-            print(f"  > Collect (forced exploration > 1.0; buffer {buffer_pct*100:.1f}%)...", end="", flush=True)
+            _clamp_note = " BnH≥0-only" if bnh_clamp_negative_terminal else ""
+            print(
+                f"  > Collect (forced exploration > 1.0; buffer {buffer_pct*100:.1f}%){_clamp_note}...",
+                end="",
+                flush=True,
+            )
             self._forced_exploration_ended_gen = -1  # Reset if we somehow dip back
             bnh_multiplier = 0.0
             loss_penalty_multiplier = 0.0
@@ -984,11 +1020,13 @@ class TradingERLWorkflow:
                 warmup_progress = float(gens_since_end) / float(self.config.bnh_penalty_warmup_gens)
                 bnh_multiplier = warmup_progress
                 loss_penalty_multiplier = base_loss_multiplier * warmup_progress
-                print(f"  > Collect (warm-up penalties {warmup_progress:.2f}x)...", end="", flush=True)
+                _cw = " BnH≥0-only" if bnh_clamp_negative_terminal else ""
+                print(f"  > Collect (warm-up penalties {warmup_progress:.2f}x){_cw}...", end="", flush=True)
             else:
                 bnh_multiplier = 1.0
                 loss_penalty_multiplier = base_loss_multiplier
-                print("  > Collect...", end="", flush=True)
+                _cw = " BnH≥0-only" if bnh_clamp_negative_terminal else ""
+                print(f"  > Collect{_cw}...", end="", flush=True)
                 
             action_bonus = 0.0
             
@@ -1005,6 +1043,7 @@ class TradingERLWorkflow:
                 bnh_multiplier,
                 loss_penalty_multiplier,
                 action_bonus,
+                bnh_clamp_negative_terminal,
             )
         )
         self.total_env_steps += self.config.steps_per_agent * self._pop_size
@@ -1046,6 +1085,7 @@ class TradingERLWorkflow:
                 bnh_multiplier=bnh_multiplier,
                 loss_penalty_multiplier=loss_penalty_multiplier,
                 action_bonus=action_bonus,
+                bnh_clamp_negative_terminal=bnh_clamp_negative_terminal,
             )
         )
         t_val_s = time.perf_counter() - t_val_start
@@ -1072,6 +1112,26 @@ class TradingERLWorkflow:
         else:
             top5_indices = []
             top5_fitness = []
+
+        # Unlock full terminal BnH (incl. negatives) next gen iff ≥4 of top-5-by-fitness
+        # have strictly positive mean validation BnH excess, for two consecutive gens.
+        # (Top-by-fitness so the quorum matches agents selection actually favors.)
+        _bnh_top5_pos_need = 4
+        _bnh_unlock_streak_need = 2
+        n_top5_bh_pos = 0
+        if n_agents >= 5:
+            top5_for_bh = np.argsort(-fit_np, kind="stable")[:5]
+            n_top5_bh_pos = int(np.sum(bh_np[top5_for_bh] > 0.0))
+            if n_top5_bh_pos >= _bnh_top5_pos_need:
+                self._bnh_quorum_streak += 1
+            else:
+                self._bnh_quorum_streak = 0
+            self._allow_negative_bnh_terminal_next_gen = (
+                self._bnh_quorum_streak >= _bnh_unlock_streak_need
+            )
+        else:
+            self._bnh_quorum_streak = 0
+            self._allow_negative_bnh_terminal_next_gen = False
 
         _wr_per_ep = per_ep_np["num_wins"] / np.maximum(per_ep_np["num_trades"], 1)
         win_rate_np = np.mean(_wr_per_ep, axis=0)  # [pop_size]
@@ -1177,6 +1237,10 @@ class TradingERLWorkflow:
             "top5_pnl": [float(pnl_np[i]) for i in top5_indices],
             "top5_bh_excess_usd": [float(bh_np[i]) for i in top5_indices],
             "top5_win_rate": [float(win_rate_np[i]) for i in top5_indices],
+            "bnh_terminal_clamp_active": bool(bnh_clamp_negative_terminal),
+            "bnh_full_terminal_next_gen": bool(self._allow_negative_bnh_terminal_next_gen),
+            "bnh_quorum_streak": int(self._bnh_quorum_streak),
+            "bnh_top5_positive_bh_count": int(n_top5_bh_pos),
             "best_agent_val_episodes": best_episodes,
             "timing_init_s": float(t_init_s),
             "timing_collect_s": float(t_collect_s),
@@ -1231,7 +1295,11 @@ class TradingERLWorkflow:
             raise ValueError("Population not initialized. Run at least one generation first.")
 
         self.key, eval_key = random.split(self.key)
-        fitness, _, _, _, _, _, _ = self._validate_population(self._stacked_params, eval_key)
+        fitness, _, _, _, _, _, _ = self._validate_population(
+            self._stacked_params,
+            eval_key,
+            bnh_clamp_negative_terminal=False,
+        )
         best_idx = int(jnp.argmax(fitness))
 
         return jax.tree.map(lambda x: x[best_idx], self._stacked_params)
