@@ -315,6 +315,7 @@ class TradingWorkflowConfig:
     target_update_period: int = 10
     steps_per_agent: int = 100
     gradient_vmap_chunk_size: Optional[int] = None
+    forced_exploration_buffer_pct: float = 0.5  # Do forced exploration until buffer is this % full
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +383,7 @@ class TradingERLWorkflow:
         val_env = self.val_env
         agent = self.agent
 
-        def _compute_action_one(params, obs, key, generation):
+        def _compute_action_one(params, obs, key, force_explore):
             state = AgentState(params=params)
             actions, _ = agent.compute_actions(state, SampleBatch(obs=obs[None]), key)
             act = actions[0]
@@ -395,7 +396,7 @@ class TradingERLWorkflow:
             def normal_fn():
                 return act
 
-            return jax.lax.cond(generation < 5, override_fn, normal_fn)
+            return jax.lax.cond(force_explore, override_fn, normal_fn)
 
         def _eval_action_one(params, obs, key):
             state = AgentState(params=params)
@@ -423,7 +424,7 @@ class TradingERLWorkflow:
             buf: ReplayBufferState,
             key: chex.PRNGKey,
             num_steps: chex.Array,
-            generation: chex.Array,
+            force_explore: chex.Array,
         ):
             """Single compiled rollout: vmap over agents × ``fori_loop`` over time steps.
 
@@ -435,7 +436,7 @@ class TradingERLWorkflow:
                 env_states, buf, key, total_reward = carry
                 key, step_key, reset_key = random.split(key, 3)
                 action_keys = random.split(step_key, pop_size_int)
-                all_actions = jax.vmap(lambda p, o, k: _compute_action_one(p, o, k, generation))(
+                all_actions = jax.vmap(lambda p, o, k: _compute_action_one(p, o, k, force_explore))(
                     stacked_params, env_states.obs, action_keys,
                 )
                 next_states = jax.vmap(lambda s, a: env.step(s, a))(
@@ -538,7 +539,7 @@ class TradingERLWorkflow:
         buf: ReplayBufferState,
         key: chex.PRNGKey,
         num_steps: int,
-        generation: int,
+        force_explore: bool,
     ) -> Tuple[Any, ReplayBufferState, chex.PRNGKey, chex.Array]:
         """Collect ``num_steps`` transitions for ALL agents in parallel.
 
@@ -551,7 +552,7 @@ class TradingERLWorkflow:
             buf,
             key,
             jnp.asarray(int(num_steps), dtype=jnp.int32),
-            jnp.asarray(int(generation), dtype=jnp.int32),
+            jnp.asarray(force_explore, dtype=jnp.bool_),
         )
         return env_states, buf, key, total_reward
 
@@ -879,10 +880,17 @@ class TradingERLWorkflow:
             print(f" {t_init_s:.1f}s", flush=True)
 
         # Phase 1 — collect experience (vmapped)
-        if self.generation < 5:
+        buffer_pct = 0.0
+        if self._replay_buffer is not None:
+            buffer_pct = float(jax.device_get(self._replay_buffer.size)) / self.config.replay_buffer_size
+
+        is_forced_explore = buffer_pct < self.config.forced_exploration_buffer_pct
+
+        if is_forced_explore:
             print("  > Collect (forced exploration > 1.0)...", end="", flush=True)
         else:
             print("  > Collect...", end="", flush=True)
+            
         t_collect_start = time.perf_counter()
         self.key, collect_key = random.split(self.key)
         self._env_states, self._replay_buffer, _, collect_reward = (
@@ -892,7 +900,7 @@ class TradingERLWorkflow:
                 self._replay_buffer,
                 collect_key,
                 self.config.steps_per_agent,
-                self.generation,
+                is_forced_explore,
             )
         )
         self.total_env_steps += self.config.steps_per_agent * self._pop_size
