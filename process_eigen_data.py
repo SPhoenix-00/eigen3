@@ -33,8 +33,11 @@ import numpy as np
 import time
 import sys
 import os
+import re
+import json
 import argparse
 from datetime import datetime
+from pathlib import Path
 
 # --- Configuration ---
 INPUT_FILE = 'Eigen3mono_master_v1.csv'
@@ -57,6 +60,45 @@ BASE_SERIES = [
 ]
 
 WARMUP_ROWS = 34   # Ramp-up rows discarded from output (same as Eigen2)
+
+_TRADING_MONO_ENV_YAML = Path(__file__).resolve().parent / "configs" / "env" / "trading_mono.yaml"
+
+
+def _format_data_path_yaml_scalar(stored: str) -> str:
+    """Plain YAML scalar when safe; else JSON double-quoted string."""
+    if re.fullmatch(r"[\w./+-]+", stored):
+        return stored
+    return json.dumps(stored)
+
+
+def sync_trading_mono_data_path(output_pkl: str) -> None:
+    """Set ``env.data_path`` in ``configs/env/trading_mono.yaml`` to match ``output_pkl``."""
+    cfg_path = _TRADING_MONO_ENV_YAML
+    if not cfg_path.is_file():
+        print(f"  Note: {cfg_path} not found; skipping env data_path sync.")
+        return
+    repo_root = Path(__file__).resolve().parent
+    out_abs = Path(output_pkl)
+    if not out_abs.is_absolute():
+        out_abs = (Path.cwd() / out_abs).resolve()
+    try:
+        stored = out_abs.relative_to(repo_root).as_posix()
+    except ValueError:
+        stored = out_abs.as_posix()
+    scalar = _format_data_path_yaml_scalar(stored)
+    text = cfg_path.read_text(encoding="utf-8")
+    new_text, n = re.subn(
+        r"^data_path:\s.*$",
+        f"data_path: {scalar}",
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if n == 0:
+        print(f"  WARNING: no data_path: line found in {cfg_path}; config not updated.")
+        return
+    cfg_path.write_text(new_text, encoding="utf-8")
+    print(f"  Config -> {cfg_path.name}: data_path: {scalar}")
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +348,8 @@ def process_csv(input_file, output_csv, output_pkl):
 
     print(f"  CSV    -> {output_csv}")
     df_out.to_csv(output_csv, index_label='date', float_format='%.10g')
+
+    sync_trading_mono_data_path(output_pkl)
 
     # ---- Step 7: Round-trip verification ----
     print("\n--- Round-trip Verification ---")

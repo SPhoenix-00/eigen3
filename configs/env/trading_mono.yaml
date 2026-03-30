@@ -1,5 +1,4 @@
 # Mono table: A=date, B=price (tradable, channel 0), C–S = 17 context → 18 channels, F=1
-# Override data_path to your PKL/CSV.
 
 # Fiscal-year-style episode: 364 env steps (one per data row); no separate settlement window.
 # min_holding_period = 30 calendar days.  The env resolves calendar gaps via dates_ordinal
@@ -32,5 +31,5 @@ observation_noise_std: 0.01
 mono_num_channels: 18
 mono_csv_header: 0
 
-# Point at your processed table (pickle or CSV)
+# Pickle or CSV; repo-relative unless absolute. Updated by process_eigen_data.py when you regenerate the PKL.
 data_path: Eigen3_Processed_OUTPUT.pkl

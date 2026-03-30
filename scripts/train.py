@@ -1,6 +1,7 @@
 """Training script for Eigen3 trading system (Eigen2-aligned)."""
 
 import hydra
+from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 import jax
 import jax.numpy as jnp
@@ -73,7 +74,7 @@ def main(cfg: DictConfig) -> None:
     key = jax.random.PRNGKey(cfg.seed)
 
     data_path = OmegaConf.select(cfg, "env.data_path", default="data/raw")
-    path = Path(data_path)
+    path = Path(to_absolute_path(str(data_path)))
     column_index = OmegaConf.select(cfg, "env.column_index", default=None)
 
     if path.is_dir() and (path / "data_array.npy").exists():
