@@ -16,6 +16,7 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install -U "jax[cuda12]"
 pip install -r requirements-train.txt
+pip install -U google-cloud-storage
 ```
 
 Quick GPU check:
@@ -24,7 +25,23 @@ Quick GPU check:
 python -c "import jax; print(jax.devices())"
 ```
 
-## 2) Data
+## 2) GCS sync (required)
+
+Set this before training:
+
+```bash
+export CLOUD_PROVIDER=gcs
+export CLOUD_BUCKET=eigen3-checkpoints-ase0
+export GOOGLE_APPLICATION_CREDENTIALS=/workspace/eigen3/gcs-credentials.json
+```
+
+Quick test (real read/write/delete check):
+
+```bash
+python -c "import os,uuid; from google.cloud import storage; b=os.environ['CLOUD_BUCKET']; c=storage.Client(); blob=c.bucket(b).blob(f'eigen3_healthcheck/{uuid.uuid4().hex}.txt'); blob.upload_from_string('ok'); _=blob.download_as_text(); blob.delete(); print('ok gcs rw/delete', b)"
+```
+
+## 3) Data
 
 Default data path is `Eigen3_Processed_OUTPUT.pkl` in repo root.
 
@@ -34,7 +51,7 @@ Options:
 
 If data is missing, training falls back to synthetic data.
 
-## 3) Train (recommended)
+## 4) Train (recommended)
 
 ```bash
 cd /workspace/eigen3
@@ -55,7 +72,7 @@ python main.py --raw-hydra population.pop_size=48
 python scripts/train.py population.pop_size=48
 ```
 
-## 4) What gets written
+## 5) What gets written
 
 - `evaluation_results/training_log_<timestamp>.txt`
 - `evaluation_results/evaluation_<run>_<timestamp>.txt`
@@ -69,14 +86,14 @@ python scripts/train.py population.pop_size=48
 - `checkpoints/<run_name>/hall_of_fame/`
 - `last_run.json`
 
-## 5) Quick verification
+## 6) Quick verification
 
 ```bash
 ls -lah evaluation_results/ | tail -n 5
 cat last_run.json
 ```
 
-## 6) Explicit evaluation command
+## 7) Explicit evaluation command
 
 Training already emits evaluation bundles on new run-best.  
 Run this only when you want an extra holdout pass:
@@ -87,19 +104,10 @@ python scripts/evaluate.py \
   --num_episodes 10
 ```
 
-## 7) Optional: GCS sync for HoF
-
-```bash
-export CLOUD_PROVIDER=gcs
-export CLOUD_BUCKET=<your-bucket>
-export GOOGLE_APPLICATION_CREDENTIALS=/workspace/eigen3/gcs-credentials.json
-```
-
-Without GCS, HoF remains local under `checkpoints/<run_name>/hall_of_fame/`.
-
 ## 8) Common issues
 
 - `ModuleNotFoundError: eigen3` -> run `pip install -e .`
 - `ModuleNotFoundError: evorl` -> run `pip install -e ./evorl`
+- `403 ... storage.buckets.get denied` -> use the GCS test above (no bucket metadata call), and ensure object permissions on the bucket
 - CPU only in JAX -> reinstall `jax[cuda12]` and verify CUDA drivers
 - GPU OOM -> lower `population.pop_size` or `population.batch_size`
