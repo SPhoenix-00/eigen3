@@ -1,12 +1,15 @@
 """Mono spreadsheet loader: A=date, B=price (ch0), C-S=context -> [T,18,1] obs."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import numpy as np
 import jax.numpy as jnp
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 MONO_DEFAULT_NUM_CHANNELS = 18
 
@@ -66,8 +69,14 @@ def load_mono_table(
 
     try:
         dates_ordinal = _parse_dates_to_ordinal(date_series)
-    except Exception:
-        # Fallback: sequential ordinals (1 row = 1 calendar day).
+    except Exception as exc:
+        logger.warning(
+            "load_mono_table: date parsing failed (%s). Falling back to "
+            "sequential ordinals (1 row = 1 calendar day). This may cause "
+            "incorrect episode boundaries and min_holding_period enforcement "
+            "if the data has weekend/holiday gaps.",
+            exc,
+        )
         dates_ordinal = np.arange(df.shape[0], dtype=np.int32)
 
     values = np.asarray(block, dtype=np.float64)

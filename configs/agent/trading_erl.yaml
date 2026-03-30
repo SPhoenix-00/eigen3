@@ -2,7 +2,7 @@
 # Based on Eigen2's ERL parameters with JAX/EvoRL adaptations
 
 # Workflow class (will be implemented)
-workflow_cls: eigen3.workflows.trading_erl_workflow.TradingERLWorkflow
+workflow_cls: eigen3.workflows.trading_workflow.TradingERLWorkflow
 
 # Population parameters
 pop_size: 16

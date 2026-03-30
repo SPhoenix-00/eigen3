@@ -228,11 +228,14 @@ def print_progress(current, total, start_time, label='Series'):
 # ---------------------------------------------------------------------------
 
 def process_csv(input_file, output_csv, output_pkl):
-    """Read the input CSV, compute indicators for each base series, write output."""
+    """Read the input CSV, compute indicators for each base series, write output.
 
+    Returns:
+        True on success, False on failure.
+    """
     if not os.path.exists(input_file):
         print(f"Error: Input file not found: {input_file}")
-        return
+        return False
 
     # ---- Step 1: Read CSV ----
     print(f"Step 1: Loading {input_file} ...")
@@ -276,34 +279,69 @@ def process_csv(input_file, output_csv, output_pkl):
     print(f"  {len(df_out)} rows remaining "
           f"(dates {df_out.index[0]} – {df_out.index[-1]})")
 
-    # ---- Step 5: Save outputs ----
-    print(f"Step 5: Saving outputs ...")
+    # ---- Step 5: Validate data ----
+    print("Step 5: Validating output data ...")
+    nan_counts = df_out.isna().sum()
+    total_nans = int(nan_counts.sum())
+    if total_nans > 0:
+        print(f"  WARNING: {total_nans} NaN value(s) remain after warm-up truncation:")
+        for col_name in nan_counts[nan_counts > 0].index:
+            print(f"    {col_name:>25s}: {nan_counts[col_name]} NaN rows")
+    else:
+        print("  All columns fully populated (0 NaN values). OK")
 
-    # PKL
+    for col_name in df_out.columns:
+        s = df_out[col_name].dropna()
+        if len(s) == 0:
+            continue
+        inf_count = int(np.isinf(s.values).sum())
+        if inf_count > 0:
+            print(f"  WARNING: {col_name} has {inf_count} infinite value(s)")
+
+    # ---- Step 6: Save outputs ----
+    print("Step 6: Saving outputs ...")
+
     print(f"  Pickle -> {output_pkl}")
     df_out.to_pickle(output_pkl)
 
-    # CSV
     print(f"  CSV    -> {output_csv}")
-    df_out.to_csv(output_csv)
+    df_out.to_csv(output_csv, index_label='date', float_format='%.10g')
 
-    # ---- Step 6: Sanity check ----
-    print("\n--- Sanity Check ---")
-    df_reload = pd.read_pickle(output_pkl)
-    print(f"  Rows in PKL on disk : {len(df_reload)}")
-    print(f"  Columns             : {list(df_reload.columns)}")
+    # ---- Step 7: Round-trip verification ----
+    print("\n--- Round-trip Verification ---")
+    df_pkl = pd.read_pickle(output_pkl)
+    df_csv_rt = pd.read_csv(output_csv, index_col='date')
 
-    print(f"\n  Per-column stats (non-NaN rows):")
-    for col in df_reload.columns:
-        s = df_reload[col].dropna()
+    pkl_ok = df_pkl.shape == df_out.shape and (df_pkl.columns == df_out.columns).all()
+    print(f"  PKL shape matches: {pkl_ok}  ({df_pkl.shape})")
+
+    csv_ok = df_csv_rt.shape == df_out.shape and (df_csv_rt.columns == df_out.columns).all()
+    print(f"  CSV shape matches: {csv_ok}  ({df_csv_rt.shape})")
+
+    if pkl_ok:
+        max_pkl_diff = float(np.nanmax(np.abs(df_pkl.values - df_out.values)))
+        print(f"  PKL max abs diff : {max_pkl_diff:.2e} (expect 0)")
+    if csv_ok:
+        max_csv_diff = float(np.nanmax(np.abs(df_csv_rt.values - df_out.values)))
+        print(f"  CSV max abs diff : {max_csv_diff:.2e} (float_format precision)")
+
+    # ---- Step 8: Summary ----
+    print("\n--- Output Summary ---")
+    print(f"  Rows   : {len(df_out)}")
+    print(f"  Columns: {len(df_out.columns)}")
+    print(f"  Dates  : {df_out.index[0]} -> {df_out.index[-1]}")
+    print(f"\n  Per-column stats:")
+    for col_name in df_out.columns:
+        s = df_out[col_name].dropna()
         if len(s) > 0:
-            print(f"    {col:>25s}:  n={len(s):5d}  "
+            print(f"    {col_name:>25s}:  n={len(s):5d}  "
                   f"min={s.min():12.4f}  max={s.max():12.4f}  "
                   f"mean={s.mean():12.4f}")
         else:
-            print(f"    {col:>25s}:  (all NaN)")
+            print(f"    {col_name:>25s}:  (all NaN)")
 
     print(f"\nSuccess!  Pickle: {output_pkl}  |  CSV: {output_csv}")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +367,9 @@ Examples:
                         help=f'Output PKL file (default: {OUTPUT_FILE_PKL})')
 
     args = parser.parse_args()
-    process_csv(args.input, args.output_csv, args.output_pkl)
+    ok = process_csv(args.input, args.output_csv, args.output_pkl)
+    if not ok:
+        sys.exit(1)
 
 
 if __name__ == '__main__':
