@@ -10,7 +10,7 @@ Key changes from the sequential version:
 - Environment stepping vmapped across the population
 - Experience collection: one ``jax.jit(jax.lax.fori_loop(...))`` over time (vmap × steps), not one Python dispatch per step
 - JAX ring-buffer replay instead of Python list-of-dicts
-- Genetic operators work directly on stacked arrays
+- Genetic operators: batched tournaments + ``vmap`` crossover/mutation (no per-offspring Python loop)
 """
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -120,6 +120,110 @@ def unstack_params(stacked: TradingNetworkParams, pop_size: int) -> List[Trading
     return [jax.tree.map(lambda x: x[i], stacked) for i in range(pop_size)]
 
 
+def _offspring_cross_mut(
+    p1: TradingNetworkParams,
+    p2: TradingNetworkParams,
+    k_cross: chex.PRNGKey,
+    k_mut: chex.PRNGKey,
+    crossover_rate: float,
+    mutation_rate: float,
+    mutation_std: float,
+) -> TradingNetworkParams:
+    """Single-offspring crossover + mutation (matches :meth:`TradingERLWorkflow._crossover_single` then ``_mutate_single``)."""
+    k1, k2 = random.split(k_cross)
+
+    def _cross(a: chex.Array, b: chex.Array, k: chex.PRNGKey) -> chex.Array:
+        mask = random.uniform(k, a.shape) < crossover_rate
+        return jnp.where(mask, a, b)
+
+    child = TradingNetworkParams(
+        actor_params=jax.tree.map(lambda a, b: _cross(a, b, k1), p1.actor_params, p2.actor_params),
+        critic_params=jax.tree.map(lambda a, b: _cross(a, b, k2), p1.critic_params, p2.critic_params),
+        target_actor_params=p1.target_actor_params,
+        target_critic_params=p1.target_critic_params,
+    )
+
+    km1, km2 = random.split(k_mut)
+
+    def _mutate(p: chex.Array, k: chex.PRNGKey) -> chex.Array:
+        mask = random.uniform(k, p.shape) < mutation_rate
+        noise = random.normal(k, p.shape) * mutation_std
+        return jnp.where(mask, p + noise, p)
+
+    return TradingNetworkParams(
+        actor_params=jax.tree.map(lambda p: _mutate(p, km1), child.actor_params),
+        critic_params=jax.tree.map(lambda p: _mutate(p, km2), child.critic_params),
+        target_actor_params=child.target_actor_params,
+        target_critic_params=child.target_critic_params,
+    )
+
+
+def breed_next_generation_batched(
+    stacked_params: TradingNetworkParams,
+    fitness: chex.Array,
+    key: chex.PRNGKey,
+    *,
+    pop_size: int,
+    elite_count: int,
+    tournament_size: int,
+    crossover_rate: float,
+    mutation_rate: float,
+    mutation_std: float,
+) -> TradingNetworkParams:
+    """Vectorized breeding: vmapped tournaments + batched gather + ``vmap`` crossover/mutation.
+
+    Replaces the Python loop over offspring (which forced many host syncs and small kernels).
+    Tournament sampling uses the first ``tournament_size`` elements of a random permutation,
+    which is equivalent to ``random.choice(..., replace=False)`` for picking the candidate set.
+    """
+    sorted_idx = jnp.argsort(-fitness)
+    elite_idx = sorted_idx[:elite_count]
+    elite_stack = jax.tree.map(lambda x: x[elite_idx], stacked_params)
+
+    n_offspring = pop_size - elite_count
+    if n_offspring <= 0:
+        return elite_stack
+
+    key, k_t1, k_t2, k_cross, k_mut = random.split(key, 5)
+    keys1 = random.split(k_t1, n_offspring)
+    keys2 = random.split(k_t2, n_offspring)
+
+    def one_tournament(k: chex.PRNGKey) -> chex.Array:
+        perm = random.permutation(k, pop_size)
+        cand = perm[:tournament_size]
+        sub = fitness[cand]
+        return cand[jnp.argmax(sub)]
+
+    p1_idx = jax.vmap(one_tournament)(keys1)
+    p2_idx = jax.vmap(one_tournament)(keys2)
+
+    p1_stack = jax.tree.map(lambda x: x[p1_idx], stacked_params)
+    p2_stack = jax.tree.map(lambda x: x[p2_idx], stacked_params)
+
+    keys_cross = random.split(k_cross, n_offspring)
+    keys_mut = random.split(k_mut, n_offspring)
+
+    axes = jax.tree.map(lambda _: 0, p1_stack)
+    offspring = jax.vmap(
+        _offspring_cross_mut,
+        in_axes=(axes, axes, 0, 0, None, None, None),
+    )(
+        p1_stack,
+        p2_stack,
+        keys_cross,
+        keys_mut,
+        crossover_rate,
+        mutation_rate,
+        mutation_std,
+    )
+
+    return jax.tree.map(
+        lambda e, o: jnp.concatenate([e, o], axis=0),
+        elite_stack,
+        offspring,
+    )
+
+
 def run_chunked_vmap_loss(
     vmap_loss: Callable[..., Dict[str, chex.Array]],
     stacked_params: TradingNetworkParams,
@@ -210,7 +314,7 @@ class TradingERLWorkflow:
         1. **Collect experience** — vmap ``env.step`` + ``agent.compute_actions``
         2. **Gradient updates** — vmap ``agent.loss`` (shared replay batch)
         3. **Evaluate** — vmap ``env.step`` + ``agent.evaluate_actions``
-        4. **Select & breed** — elitism + tournament → crossover + mutation
+        4. **Select & breed** — elitism + vmapped tournaments → batched crossover + mutation
     """
 
     def __init__(
@@ -486,16 +590,18 @@ class TradingERLWorkflow:
         """Validate all agents in parallel on held-out data.
 
         Returns:
-            Tuple of ``(fitness, mean_bh_excess_usd, mean_total_gain_pct,
+            Tuple of ``(fitness, mean_bh_excess_usd, val_roi_pct,
             mean_pnl, mean_episode_reward, min_episode_reward, per_episode)``.
             The first six are each ``[pop_size]``; ``per_episode`` is a dict of
             ``[n_episodes, pop_size]`` matrices with full episode detail
             (rewards, PnL, trades, win/loss counts, etc.).
             Fitness is the mean of the ``conservative_k`` lowest episode total
-            rewards.  Buy-hold excess, gain %, and PnL are means over
-            validation episodes (captured at first ``done`` per episode).
-            Mean/min episode reward are taken over validation episodes
-            (not the bottom-k fitness slice).
+            rewards.  ``val_roi_pct`` is aggregate validation ROI in **percent**:
+            ``100 * sum(episode total_pnl) / max(episode peak_capital_employed)``
+            per agent (0 if max peak is 0).  Buy-hold excess and PnL entries
+            are means over validation episodes (captured at first ``done`` per
+            episode).  Mean/min episode reward are taken over validation
+            episodes (not the bottom-k fitness slice).
         """
         pop_size = self._pop_size
         # At least one validation episode (0 would make jnp.stack fail).
@@ -616,8 +722,15 @@ class TradingERLWorkflow:
         # are already trading (whose fitness >> this term).
         fitness = raw_fitness + mean_max_coeff * 1e-2
         mean_excess = jnp.mean(excess_matrix, axis=0)
-        mean_gain = jnp.mean(gain_matrix, axis=0)
         pnl_matrix = jnp.stack(all_ep_pnl, axis=0)
+        peak_matrix = jnp.stack(all_ep_peak_capital, axis=0)
+        sum_pnl = jnp.sum(pnl_matrix, axis=0)
+        max_peak = jnp.max(peak_matrix, axis=0)
+        val_roi_pct = jnp.where(
+            max_peak > 0,
+            100.0 * sum_pnl / max_peak,
+            jnp.zeros_like(sum_pnl),
+        )
         mean_pnl = jnp.mean(pnl_matrix, axis=0)
         reward_mean = jnp.mean(rewards_matrix, axis=0)
         reward_min = jnp.min(rewards_matrix, axis=0)
@@ -635,7 +748,7 @@ class TradingERLWorkflow:
             "steps": jnp.stack(all_ep_steps, axis=0),
             "max_coeff": coeff_matrix,
         }
-        return fitness, mean_excess, mean_gain, mean_pnl, reward_mean, reward_min, per_episode
+        return fitness, mean_excess, val_roi_pct, mean_pnl, reward_mean, reward_min, per_episode
 
     # ------------------------------------------------------------------
     # Phase 4 — Genetic operators
@@ -695,33 +808,18 @@ class TradingERLWorkflow:
         fitness: chex.Array,
         key: chex.PRNGKey,
     ) -> TradingNetworkParams:
-        """Elitism + tournament selection → crossover + mutation → new population."""
-        pop_size = self._pop_size
-        elite_count = self.config.elite_size
-        sorted_idx = jnp.argsort(-fitness)
-
-        # Preserve elites unchanged
-        elites = [
-            jax.tree.map(lambda x: x[int(sorted_idx[i])], stacked_params)
-            for i in range(elite_count)
-        ]
-
-        # Breed remaining children
-        children: List[TradingNetworkParams] = []
-        for _ in range(pop_size - elite_count):
-            key, k1, k2, k3, k4 = random.split(key, 5)
-
-            p1_idx = self._tournament_select(fitness, k1)
-            p2_idx = self._tournament_select(fitness, k2)
-
-            p1 = jax.tree.map(lambda x: x[p1_idx], stacked_params)
-            p2 = jax.tree.map(lambda x: x[p2_idx], stacked_params)
-
-            child = self._crossover_single(p1, p2, k3)
-            child = self._mutate_single(child, k4)
-            children.append(child)
-
-        return stack_params(elites + children)
+        """Elitism + tournament selection → crossover + mutation → new population (batched)."""
+        return breed_next_generation_batched(
+            stacked_params,
+            fitness,
+            key,
+            pop_size=self._pop_size,
+            elite_count=self.config.elite_size,
+            tournament_size=self.config.tournament_size,
+            crossover_rate=self.config.crossover_rate,
+            mutation_rate=self.config.mutation_rate,
+            mutation_std=self.config.mutation_std,
+        )
 
     # ------------------------------------------------------------------
     # Main loop
@@ -774,7 +872,7 @@ class TradingERLWorkflow:
         print("  > Val...", end="", flush=True)
         t_val_start = time.perf_counter()
         self.key, val_key = random.split(self.key)
-        fitness_scores, bh_excess, gain_pct, pnl_mean_arr, reward_mean_arr, reward_min_arr, per_episode = (
+        fitness_scores, bh_excess, val_roi_pct, pnl_mean_arr, reward_mean_arr, reward_min_arr, per_episode = (
             self._validate_population(self._stacked_params, val_key)
         )
         t_val_s = time.perf_counter() - t_val_start
@@ -784,7 +882,7 @@ class TradingERLWorkflow:
         t_stats_start = time.perf_counter()
         fit_np = np.asarray(jax.device_get(fitness_scores))
         bh_np = np.asarray(jax.device_get(bh_excess))
-        gain_np = np.asarray(jax.device_get(gain_pct))
+        roi_np = np.asarray(jax.device_get(val_roi_pct))
         pnl_np = np.asarray(jax.device_get(pnl_mean_arr))
         rew_mean_np = np.asarray(jax.device_get(reward_mean_arr))
         rew_min_np = np.asarray(jax.device_get(reward_min_arr))
@@ -811,6 +909,9 @@ class TradingERLWorkflow:
         for ep_i in range(n_val_eps):
             nt = int(per_ep_np["num_trades"][ep_i, bi])
             nw = int(per_ep_np["num_wins"][ep_i, bi])
+            ep_peak = float(per_ep_np["peak_capital"][ep_i, bi])
+            ep_pnl = float(per_ep_np["pnl"][ep_i, bi])
+            ep_roi = (100.0 * ep_pnl / ep_peak) if ep_peak > 0 else 0.0
             best_episodes.append({
                 "total_reward": float(per_ep_np["rewards"][ep_i, bi]),
                 "steps": int(per_ep_np["steps"][ep_i, bi]),
@@ -818,8 +919,9 @@ class TradingERLWorkflow:
                 "num_wins": nw,
                 "num_losses": int(per_ep_np["num_losses"][ep_i, bi]),
                 "total_gain_pct": float(per_ep_np["gain_pct"][ep_i, bi]),
-                "total_pnl": float(per_ep_np["pnl"][ep_i, bi]),
-                "peak_capital_employed": float(per_ep_np["peak_capital"][ep_i, bi]),
+                "total_pnl": ep_pnl,
+                "episode_roi_pct": ep_roi,
+                "peak_capital_employed": ep_peak,
                 "days_with_positions": int(per_ep_np["days_with_pos"][ep_i, bi]),
                 "days_without_positions": int(per_ep_np["days_without_pos"][ep_i, bi]),
                 "win_rate": float(nw) / max(nt, 1),
@@ -837,7 +939,7 @@ class TradingERLWorkflow:
                     population_list[i],
                     float(fit_np[i]),
                     i,
-                    float(gain_np[i]),
+                    float(roi_np[i]),
                     0.0,
                     0.0,
                     0,
@@ -898,7 +1000,7 @@ class TradingERLWorkflow:
             "top5_fitness": top5_fitness,
             "top5_val_reward_mean": [float(rew_mean_np[i]) for i in top5_indices],
             "top5_val_reward_min": [float(rew_min_np[i]) for i in top5_indices],
-            "top5_gain_pct": [float(gain_np[i]) for i in top5_indices],
+            "top5_roi_pct": [float(roi_np[i]) for i in top5_indices],
             "top5_pnl": [float(pnl_np[i]) for i in top5_indices],
             "top5_bh_excess_usd": [float(bh_np[i]) for i in top5_indices],
             "top5_win_rate": [float(win_rate_np[i]) for i in top5_indices],
