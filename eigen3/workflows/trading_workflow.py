@@ -486,10 +486,12 @@ class TradingERLWorkflow:
         """Evaluate all agents in parallel.
 
         Returns:
-            Tuple of ``(fitness, mean_bh_excess_usd, mean_total_gain_pct)``, each
-            ``[pop_size]``.  Fitness is the mean of the ``conservative_k`` lowest
-            episode total rewards.  Buy-hold excess and gain % are means over
-            eval episodes (captured at first ``done`` per episode).
+            Tuple of ``(fitness, mean_bh_excess_usd, mean_total_gain_pct,
+            mean_episode_reward, min_episode_reward)``, each ``[pop_size]``.
+            Fitness is the mean of the ``conservative_k`` lowest episode total
+            rewards.  Buy-hold excess and gain % are means over eval episodes
+            (captured at first ``done`` per episode).  Mean/min episode reward
+            are taken over eval episodes (not the bottom-k fitness slice).
         """
         pop_size = self._pop_size
         # At least one eval episode (0 would make jnp.stack fail).
@@ -562,7 +564,9 @@ class TradingERLWorkflow:
         fitness = jnp.mean(bottom_k, axis=0)
         mean_excess = jnp.mean(excess_matrix, axis=0)
         mean_gain = jnp.mean(gain_matrix, axis=0)
-        return fitness, mean_excess, mean_gain
+        reward_mean = jnp.mean(rewards_matrix, axis=0)
+        reward_min = jnp.min(rewards_matrix, axis=0)
+        return fitness, mean_excess, mean_gain, reward_mean, reward_min
 
     # ------------------------------------------------------------------
     # Phase 4 — Genetic operators
@@ -691,8 +695,8 @@ class TradingERLWorkflow:
         # Phase 3 — evaluate population (vmapped)
         t_eval_start = time.perf_counter()
         self.key, eval_key = random.split(self.key)
-        fitness_scores, bh_excess, gain_pct = self._evaluate_population(
-            self._stacked_params, eval_key,
+        fitness_scores, bh_excess, gain_pct, reward_mean_arr, reward_min_arr = (
+            self._evaluate_population(self._stacked_params, eval_key)
         )
         t_eval_s = time.perf_counter() - t_eval_start
 
@@ -700,6 +704,8 @@ class TradingERLWorkflow:
         fit_np = np.asarray(jax.device_get(fitness_scores))
         bh_np = np.asarray(jax.device_get(bh_excess))
         gain_np = np.asarray(jax.device_get(gain_pct))
+        rew_mean_np = np.asarray(jax.device_get(reward_mean_arr))
+        rew_min_np = np.asarray(jax.device_get(reward_min_arr))
         self._last_best_idx = int(np.argmax(fit_np))
 
         n_agents = int(fit_np.size)
@@ -777,6 +783,10 @@ class TradingERLWorkflow:
             "positive_agents": int(np.sum(fit_np > 0.0)),
             "top5_indices": top5_indices,
             "top5_fitness": top5_fitness,
+            "top5_val_reward_mean": [float(rew_mean_np[i]) for i in top5_indices],
+            "top5_val_reward_min": [float(rew_min_np[i]) for i in top5_indices],
+            "top5_gain_pct": [float(gain_np[i]) for i in top5_indices],
+            "top5_bh_excess_usd": [float(bh_np[i]) for i in top5_indices],
             "timing_collect_s": float(t_collect_s),
             "timing_train_s": float(t_train_s),
             "timing_eval_s": float(t_eval_s),
@@ -828,7 +838,7 @@ class TradingERLWorkflow:
             raise ValueError("Population not initialized. Run at least one generation first.")
 
         self.key, eval_key = random.split(self.key)
-        fitness, _, _ = self._evaluate_population(self._stacked_params, eval_key)
+        fitness, _, _, _, _ = self._evaluate_population(self._stacked_params, eval_key)
         best_idx = int(jnp.argmax(fitness))
 
         return jax.tree.map(lambda x: x[best_idx], self._stacked_params)

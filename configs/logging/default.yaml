@@ -31,8 +31,7 @@ log_gpu_memory: false
 # 0 = after workflow init + after first generation only; 1 = every generation; N = first + every Nth
 log_gpu_memory_every_n_generations: 0
 
-# Best-agent progress probe per generation (validation env, deterministic episodes)
-progress_eval_episodes: 1
+# Top-5 validation table uses generation eval metrics only (no extra env rollouts).
 
 # Logging intervals
 log_interval: 1  # Log metrics every N generations

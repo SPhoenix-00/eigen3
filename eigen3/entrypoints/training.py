@@ -322,10 +322,15 @@ def _print_generation_summary(
         for rank, (idx, fitness, ev) in enumerate(top5_evals, 1):
             roi = ev.get('gain_pct_mean', 0.0)
             pnl = ev.get('pnl_mean', 0.0)
-            wr = ev.get('win_rate_mean', 0.0) * 100.0
+            wr_raw = ev.get("win_rate_mean", None)
+            wr_str = "  N/A" if wr_raw is None else f"{float(wr_raw) * 100.0:5.1f}%"
             r_mean = ev.get('reward_mean', 0.0)
             r_min = ev.get('reward_min', 0.0)
-            print(f"  {rank}. Agent {idx:2d}: Fitness={fitness:8.2f}, Val=[mean:{r_mean:6.2f}, min:{r_min:6.2f}], ROI={roi:6.2f}%, PnL=${pnl:8.2f}, WR={wr:5.1f}%")
+            print(
+                f"  {rank}. Agent {idx:2d}: Fitness={fitness:8.2f}, "
+                f"Val=[mean:{r_mean:6.2f}, min:{r_min:6.2f}], ROI={roi:6.2f}%, "
+                f"PnL=${pnl:8.2f}, WR={wr_str}"
+            )
     else:
         print("  (No Top 5 stats available)")
 
@@ -353,6 +358,31 @@ def _print_generation_summary(
         f"Env steps: {metrics.get('total_env_steps', 0):,}"
     )
     print("\n" + "=" * 70 + "\n")
+
+
+def _top5_eval_rows_from_metrics(metrics: dict[str, Any]) -> list[tuple[int, float, dict[str, Any]]]:
+    """Build Top-5 validation table rows from :meth:`TradingERLWorkflow.run_generation` metrics.
+
+    Uses the same vmapped eval as fitness (no extra env rollouts).
+    """
+    indices = metrics.get("top5_indices") or []
+    fitness_list = metrics.get("top5_fitness") or []
+    rm = metrics.get("top5_val_reward_mean") or []
+    rmin = metrics.get("top5_val_reward_min") or []
+    gp = metrics.get("top5_gain_pct") or []
+    bh = metrics.get("top5_bh_excess_usd") or []
+    rows: list[tuple[int, float, dict[str, Any]]] = []
+    for rank, idx in enumerate(indices):
+        ev = {
+            "reward_mean": rm[rank] if rank < len(rm) else 0.0,
+            "reward_min": rmin[rank] if rank < len(rmin) else 0.0,
+            "gain_pct_mean": gp[rank] if rank < len(gp) else 0.0,
+            "pnl_mean": bh[rank] if rank < len(bh) else 0.0,
+            "win_rate_mean": None,
+        }
+        fit = float(fitness_list[rank]) if rank < len(fitness_list) else float("nan")
+        rows.append((int(idx), fit, ev))
+    return rows
 
 
 def _evaluate_agent_on_env(
@@ -856,7 +886,6 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
 
     log_vram = bool(OmegaConf.select(cfg, "logging.log_gpu_memory", default=True))
     vram_interval = int(OmegaConf.select(cfg, "logging.log_gpu_memory_every_n_generations", default=0))
-    progress_eval_episodes = int(OmegaConf.select(cfg, "logging.progress_eval_episodes", default=1))
     if log_vram:
         log_gpu_memory_report(logger, "workflow initialized (replay + compiled graphs warm)")
 
@@ -885,26 +914,8 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
             if log_vram and should_log_gpu_memory_this_generation(vram_interval, gen):
                 log_gpu_memory_report(logger, f"after generation {gen + 1}/{num_gen}")
             all_metrics.append(metrics)
-            
-            top5_evals = []
-            logger.info(
-                "\nValidation rollout for Top 5 agents (%d episode(s))...",
-                max(1, progress_eval_episodes),
-            )
-            import sys
-            sys.stdout.flush()
-            
-            for rank, idx in enumerate(metrics.get("top5_indices", [])):
-                agent_params = jax.tree.map(lambda x: x[idx], workflow._stacked_params)
-                ev = _evaluate_agent_on_env(
-                    env=val_env,
-                    agent=agent,
-                    params=agent_params,
-                    seed=int(cfg.seed) + gen + 500_000 + rank,
-                    num_episodes=max(1, progress_eval_episodes),
-                )
-                top5_evals.append((idx, metrics["top5_fitness"][rank], ev))
-                
+
+            top5_evals = _top5_eval_rows_from_metrics(metrics)
             progress_eval = top5_evals[0][2] if top5_evals else {}
             best_params_for_progress = jax.tree.map(lambda x: x[metrics["top5_indices"][0]], workflow._stacked_params) if top5_evals else workflow.get_last_best_agent()
             
