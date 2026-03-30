@@ -6,8 +6,10 @@ are saved as JSON and optionally printed to the console.
 """
 
 import argparse
+import csv
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 
 import jax
@@ -44,8 +46,14 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
-        "--output_dir", type=str, default="eval_results",
+        "--output_dir", type=str, default="evaluation_results",
         help="Directory to save evaluation results",
+    )
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default="",
+        help="Optional run name for output filenames (defaults to checkpoint stem)",
     )
 
     # Environment overrides (should match training config)
@@ -295,10 +303,74 @@ def main():
     # --- Save ---
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / "eval_results.json"
-    with open(out_file, "w") as f:
+    run_name = args.run_name.strip() or Path(args.checkpoint_path).stem
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base = f"{run_name}_{stamp}"
+    out_json = out_dir / f"evaluation_{base}.json"
+    out_txt = out_dir / f"evaluation_{base}.txt"
+    out_summary_csv = out_dir / f"summary_{base}.csv"
+    out_trades_csv = out_dir / f"trades_{base}.csv"
+
+    with open(out_json, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
-    logger.info("Results saved to %s", out_file)
+
+    summary_fields = [
+        "checkpoint",
+        "data_path",
+        "num_episodes",
+        "seed",
+        "reward_mean",
+        "reward_std",
+        "reward_min",
+        "reward_max",
+        "pnl_mean",
+        "pnl_std",
+        "win_rate_mean",
+    ]
+    with open(out_summary_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=summary_fields)
+        writer.writeheader()
+        writer.writerow({k: summary.get(k, "") for k in summary_fields})
+
+    trade_fields = [
+        "episode_index",
+        "total_reward",
+        "steps",
+        "num_trades",
+        "num_wins",
+        "num_losses",
+        "total_gain_pct",
+        "total_pnl",
+        "peak_capital_employed",
+        "days_with_positions",
+        "days_without_positions",
+        "win_rate",
+    ]
+    with open(out_trades_csv, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=trade_fields)
+        writer.writeheader()
+        for idx, row in enumerate(summary["episodes"], start=1):
+            out_row = dict(row)
+            out_row["episode_index"] = idx
+            writer.writerow({k: out_row.get(k, "") for k in trade_fields})
+
+    lines = [
+        f"Run: {run_name}",
+        f"Checkpoint: {args.checkpoint_path}",
+        f"Episodes: {args.num_episodes}",
+        f"Reward mean/std: {summary['reward_mean']:.6f} / {summary['reward_std']:.6f}",
+        f"PnL mean/std: {summary['pnl_mean']:.6f} / {summary['pnl_std']:.6f}",
+        f"Win rate mean: {summary['win_rate_mean'] * 100:.2f}%",
+        f"JSON: {out_json}",
+        f"Summary CSV: {out_summary_csv}",
+        f"Trades CSV: {out_trades_csv}",
+    ]
+    out_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    logger.info("Results saved to %s", out_json)
+    logger.info("Summary CSV saved to %s", out_summary_csv)
+    logger.info("Trades CSV saved to %s", out_trades_csv)
+    logger.info("Text summary saved to %s", out_txt)
 
 
 if __name__ == "__main__":

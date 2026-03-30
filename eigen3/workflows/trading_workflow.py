@@ -199,6 +199,7 @@ class TradingERLWorkflow:
         self._replay_buffer: Optional[ReplayBufferState] = None
         self.generation = 0
         self.total_env_steps = 0
+        self._last_best_idx: Optional[int] = None
 
         self.hof = hall_of_fame
 
@@ -568,6 +569,7 @@ class TradingERLWorkflow:
         # Phase 3 — evaluate population (vmapped)
         self.key, eval_key = random.split(self.key)
         fitness_scores = self._evaluate_population(self._stacked_params, eval_key)
+        self._last_best_idx = int(jnp.argmax(fitness_scores))
 
         # Phase 3b — Hall of Fame
         if self.hof is not None:
@@ -631,6 +633,12 @@ class TradingERLWorkflow:
 
         return metrics
 
+    def get_last_best_agent(self) -> TradingNetworkParams:
+        """Return best agent params from the most recent generation evaluation."""
+        if self._stacked_params is None or self._last_best_idx is None:
+            raise ValueError("No evaluated generation yet; run at least one generation first.")
+        return jax.tree.map(lambda x: x[self._last_best_idx], self._stacked_params)
+
     def train(self, num_generations: int) -> List[Dict[str, Any]]:
         """Train for ``num_generations`` generations."""
         all_metrics: List[Dict[str, Any]] = []
@@ -643,6 +651,7 @@ class TradingERLWorkflow:
                 f"Generation {gen + 1}/{num_generations}  "
                 f"Mean: {metrics['mean_fitness']:.2f}  "
                 f"Max: {metrics['max_fitness']:.2f}  "
+                f"Min: {metrics['min_fitness']:.2f}  "
                 f"Steps: {metrics['total_env_steps']}"
             )
 

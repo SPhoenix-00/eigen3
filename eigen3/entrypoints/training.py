@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import csv
+import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 from unittest.mock import MagicMock
@@ -26,6 +29,8 @@ from eigen3.data.splits import compute_train_val_holdout_split, slice_trading_ti
 from eigen3.environment.trading_env import TradingEnv
 from eigen3.models import Actor, DoubleCritic
 from eigen3.workflows import TradingWorkflowConfig, create_trading_workflow
+from evorl.agent import AgentState
+from evorl.sample_batch import SampleBatch
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +72,225 @@ class TeeLogger:
 
     def close(self) -> None:
         self.log_file.close()
+
+
+class CompatArtifactManager:
+    """Eigen2-style artifact writer rooted at repo-level directories."""
+
+    def __init__(
+        self,
+        *,
+        artifact_root: Path,
+        eval_dir: Path,
+        checkpoint_root: Path,
+        run_name: str,
+        run_id: str,
+    ):
+        self.artifact_root = artifact_root
+        self.eval_dir = eval_dir
+        self.checkpoint_root = checkpoint_root
+        self.run_name = run_name
+        self.run_id = run_id
+        self.run_dir = checkpoint_root / run_name
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.eval_dir.mkdir(parents=True, exist_ok=True)
+        self.best_agent_path = self.run_dir / "best_agent.msgpack"
+        self.best_meta_path = self.run_dir / "best_agent.meta.json"
+        self.metrics_path = self.run_dir / "metrics_history.jsonl"
+        self.summary_path = self.run_dir / "run_summary.json"
+        self.last_run_path = self.artifact_root / "last_run.json"
+
+    def append_metric(self, metrics: dict[str, Any]) -> None:
+        with self.metrics_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(metrics) + "\n")
+
+    def save_best_agent(self, params: Any, generation: int, score: float) -> Path:
+        from flax.serialization import to_bytes
+
+        self.best_agent_path.write_bytes(to_bytes(params))
+        with self.best_meta_path.open("w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "run_name": self.run_name,
+                    "run_id": self.run_id,
+                    "generation": generation,
+                    "score": float(score),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "best_agent_path": str(self.best_agent_path),
+                },
+                f,
+                indent=2,
+            )
+        return self.best_agent_path
+
+    def write_last_run(self) -> None:
+        payload = {
+            "run_name": self.run_name,
+            "run_id": self.run_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "checkpoint_dir": str(self.run_dir),
+            "best_agent_path": str(self.best_agent_path),
+        }
+        with self.last_run_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    def write_run_summary(
+        self,
+        *,
+        last_metrics: dict[str, Any],
+        hydra_output_dir: str | None,
+        config_yaml: str,
+    ) -> None:
+        payload = {
+            "run_name": self.run_name,
+            "run_id": self.run_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "hydra_output_dir": hydra_output_dir,
+            "checkpoint_dir": str(self.run_dir),
+            "metrics_file": str(self.metrics_path),
+            "best_meta_file": str(self.best_meta_path),
+            "last_metrics": last_metrics,
+            "resolved_config_yaml": config_yaml,
+        }
+        with self.summary_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    def write_evaluation_bundle(self, payload: dict[str, Any]) -> dict[str, str]:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = f"{self.run_name}_{stamp}"
+        txt_path = self.eval_dir / f"evaluation_{base}.txt"
+        json_path = self.eval_dir / f"evaluation_{base}.json"
+        summary_csv_path = self.eval_dir / f"summary_{base}.csv"
+        trades_csv_path = self.eval_dir / f"trades_{base}.csv"
+
+        with json_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+        summary_fields = [
+            "run_name",
+            "num_episodes",
+            "reward_mean",
+            "reward_std",
+            "pnl_mean",
+            "pnl_std",
+            "win_rate_mean",
+            "num_trades_mean",
+        ]
+        with summary_csv_path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=summary_fields)
+            writer.writeheader()
+            writer.writerow({k: payload.get(k, "") for k in summary_fields})
+
+        episode_fields = [
+            "episode_index",
+            "total_reward",
+            "steps",
+            "num_trades",
+            "num_wins",
+            "num_losses",
+            "total_gain_pct",
+            "total_pnl",
+            "win_rate",
+            "peak_capital_employed",
+            "days_with_positions",
+            "days_without_positions",
+        ]
+        with trades_csv_path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=episode_fields)
+            writer.writeheader()
+            for idx, row in enumerate(payload.get("episodes", []), start=1):
+                out = dict(row)
+                out["episode_index"] = idx
+                writer.writerow({k: out.get(k, "") for k in episode_fields})
+
+        lines = [
+            f"Run: {self.run_name}",
+            f"Episodes: {payload.get('num_episodes', 0)}",
+            f"Reward mean/std: {payload.get('reward_mean', 0.0):.6f} / {payload.get('reward_std', 0.0):.6f}",
+            f"PnL mean/std: {payload.get('pnl_mean', 0.0):.6f} / {payload.get('pnl_std', 0.0):.6f}",
+            f"Win rate mean: {100.0 * payload.get('win_rate_mean', 0.0):.2f}%",
+            f"Summary CSV: {summary_csv_path}",
+            f"Trades CSV: {trades_csv_path}",
+            f"JSON: {json_path}",
+        ]
+        txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        return {
+            "txt": str(txt_path),
+            "json": str(json_path),
+            "summary_csv": str(summary_csv_path),
+            "trades_csv": str(trades_csv_path),
+        }
+
+
+def _compat_mode_enabled() -> bool:
+    return os.environ.get("EIGEN3_COMPAT_MODE", "1") != "0"
+
+
+def _phase_log(label: str) -> None:
+    logger.info("========== %s ==========", label)
+
+
+def _evaluate_agent_on_env(
+    *,
+    env: TradingEnv,
+    agent: TradingAgent,
+    params: Any,
+    seed: int,
+    num_episodes: int = 3,
+) -> dict[str, Any]:
+    key = jax.random.PRNGKey(seed)
+    agent_state = AgentState(params=params)
+    episodes: list[dict[str, Any]] = []
+
+    for _ in range(num_episodes):
+        key, reset_key = jax.random.split(key)
+        state = env.reset(reset_key)
+        total_reward = 0.0
+        steps = 0
+        while not bool(state.done):
+            obs_batch = state.obs[None, ...]
+            sample = SampleBatch(obs=obs_batch)
+            key, act_key = jax.random.split(key)
+            actions, _ = agent.evaluate_actions(agent_state, sample, act_key)
+            action = actions[0]
+            state = env.step(state, action)
+            total_reward += float(state.reward)
+            steps += 1
+
+        es = state.env_state
+        episodes.append(
+            {
+                "total_reward": total_reward,
+                "steps": steps,
+                "num_trades": int(es.num_trades),
+                "num_wins": int(es.num_wins),
+                "num_losses": int(es.num_losses),
+                "total_gain_pct": float(es.total_gain_pct),
+                "total_pnl": float(es.total_pnl),
+                "peak_capital_employed": float(es.peak_capital_employed),
+                "days_with_positions": int(es.days_with_positions),
+                "days_without_positions": int(es.days_without_positions),
+                "win_rate": float(es.num_wins) / max(int(es.num_trades), 1),
+            }
+        )
+
+    rewards = np.asarray([e["total_reward"] for e in episodes], dtype=np.float64)
+    pnls = np.asarray([e["total_pnl"] for e in episodes], dtype=np.float64)
+    wins = np.asarray([e["win_rate"] for e in episodes], dtype=np.float64)
+    trades = np.asarray([e["num_trades"] for e in episodes], dtype=np.float64)
+    return {
+        "num_episodes": int(num_episodes),
+        "reward_mean": float(rewards.mean()),
+        "reward_std": float(rewards.std()),
+        "reward_min": float(rewards.min()),
+        "reward_max": float(rewards.max()),
+        "pnl_mean": float(pnls.mean()),
+        "pnl_std": float(pnls.std()),
+        "win_rate_mean": float(wins.mean()),
+        "num_trades_mean": float(trades.mean()),
+        "episodes": episodes,
+    }
 
 
 def _short_class(path: Optional[str]) -> str:
@@ -236,15 +460,20 @@ def run_training(cfg: DictConfig) -> List[dict[str, Any]]:
 
 
 def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
+    compat_mode = _compat_mode_enabled()
     tee_active = os.environ.get(TEE_ENV_VAR)
     if tee_active:
         logger.info("Mirroring console to %s", tee_active)
+    if compat_mode:
+        _phase_log("Phase 0: Startup")
     logger.info(run_config_summary(cfg))
     logger.debug("Full resolved configuration:\n%s", OmegaConf.to_yaml(cfg, resolve=True))
 
     logger.info("Setting random seed: %s", cfg.seed)
     key = jax.random.PRNGKey(int(cfg.seed))
 
+    if compat_mode:
+        _phase_log("Phase 1: Data Loading")
     data_path = OmegaConf.select(cfg, "env.data_path", default="data/raw")
     path = Path(hydra.utils.to_absolute_path(str(data_path)))
     column_index = OmegaConf.select(cfg, "env.column_index", default=None)
@@ -327,6 +556,8 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         data_array, data_array_full, dates_np, split.val_env_start, split.val_end
     )
 
+    if compat_mode:
+        _phase_log("Phase 2: Environment Setup")
     logger.info("Creating trading environments (train + validation; holdout excluded)...")
 
     def _make_env(data_obs, data_f, dates_ord, *, is_training: bool):
@@ -383,6 +614,8 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
 
     akey = jax.random.PRNGKey(int(cfg.seed) + 1)
     _ = agent.init(env.obs_space, env.action_space, akey)
+    if compat_mode:
+        _phase_log("Phase 3: Workflow Initialization")
     logger.info("TradingAgent init OK; starting TradingERLWorkflow.")
 
     from eigen3.erl.cloud_sync import CloudSync
@@ -392,8 +625,34 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
     cloud_project = OmegaConf.select(cfg, "population.cloud_project_name", default="eigen3")
     cloud_sync = CloudSync.from_env(project_name=cloud_project)
 
-    checkpoint_dir = Path(hydra.utils.to_absolute_path("checkpoints"))
+    run_name = str(OmegaConf.select(cfg, "run_name", default="run"))
+    run_id = os.environ.get("EIGEN3_RUN_STAMP", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    artifact_root = Path(
+        os.environ.get(
+            "EIGEN3_ARTIFACT_ROOT",
+            str(Path(hydra.utils.to_absolute_path("."))),
+        )
+    )
+    eval_dir = Path(os.environ.get("EIGEN3_EVAL_DIR", str(artifact_root / "evaluation_results")))
+    checkpoint_root = Path(
+        os.environ.get("EIGEN3_CHECKPOINT_ROOT", str(artifact_root / "checkpoints"))
+    )
+    run_checkpoint_dir = checkpoint_root / run_name if compat_mode else Path(
+        hydra.utils.to_absolute_path("checkpoints")
+    )
+    checkpoint_dir = run_checkpoint_dir
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    artifact_mgr: CompatArtifactManager | None = None
+    if compat_mode:
+        artifact_mgr = CompatArtifactManager(
+            artifact_root=artifact_root,
+            eval_dir=eval_dir,
+            checkpoint_root=checkpoint_root,
+            run_name=run_name,
+            run_id=run_id,
+        )
+        artifact_mgr.write_last_run()
 
     hof = HallOfFame(
         capacity=hof_capacity,
@@ -423,7 +682,48 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
 
     num_gen = int(OmegaConf.select(cfg, "population.total_generations", default=100))
     logger.info("Running %d generations (TradingERLWorkflow)...", num_gen)
-    all_metrics = workflow.train(num_gen)
+    if compat_mode:
+        _phase_log("Phase 4: Training Loop")
+    all_metrics: list[dict[str, Any]] = []
+    best_score = float("-inf")
+    for gen in range(num_gen):
+        metrics = workflow.run_generation()
+        all_metrics.append(metrics)
+        print(
+            f"Generation {gen + 1}/{num_gen}  "
+            f"Mean: {metrics['mean_fitness']:.2f}  "
+            f"Max: {metrics['max_fitness']:.2f}  "
+            f"Min: {metrics['min_fitness']:.2f}  "
+            f"Steps: {metrics['total_env_steps']}"
+        )
+        if artifact_mgr is not None:
+            artifact_mgr.append_metric(metrics)
+            score = float(metrics.get("max_fitness", float("-inf")))
+            if score > best_score:
+                best_score = score
+                best_params = workflow.get_last_best_agent()
+                best_path = artifact_mgr.save_best_agent(
+                    best_params,
+                    generation=int(metrics.get("generation", gen + 1)),
+                    score=score,
+                )
+                eval_payload = _evaluate_agent_on_env(
+                    env=val_env,
+                    agent=agent,
+                    params=best_params,
+                    seed=int(cfg.seed) + gen + 1000,
+                    num_episodes=min(3, int(OmegaConf.select(cfg, "population.eval_episodes", 5))),
+                )
+                eval_payload["run_name"] = run_name
+                eval_payload["generation"] = int(metrics.get("generation", gen + 1))
+                eval_paths = artifact_mgr.write_evaluation_bundle(eval_payload)
+                logger.info(
+                    "New best (gen=%s score=%.6f) saved to %s | eval: %s",
+                    metrics.get("generation", gen + 1),
+                    score,
+                    best_path,
+                    eval_paths["json"],
+                )
 
     last = all_metrics[-1] if all_metrics else {}
     logger.info(
@@ -434,6 +734,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         last.get("total_env_steps", "?"),
     )
 
+    out_dir: str | None = None
     try:
         from hydra.core.hydra_config import HydraConfig
 
@@ -447,5 +748,15 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         tb_dir = OmegaConf.select(cfg, "logging.tensorboard_log_dir", default="")
         if tb_dir:
             logger.info("TensorBoard: tensorboard --logdir %s", tb_dir)
+
+    if artifact_mgr is not None:
+        if compat_mode:
+            _phase_log("Phase 5: Finalization")
+        artifact_mgr.write_last_run()
+        artifact_mgr.write_run_summary(
+            last_metrics=last,
+            hydra_output_dir=out_dir,
+            config_yaml=OmegaConf.to_yaml(cfg, resolve=True),
+        )
 
     return all_metrics
