@@ -118,7 +118,8 @@ roi_adjustment_multiplier: 50.0      # Eigen2 ROI_ADJUSTMENT_MULTIPLIER
 roi_confidence_min_trades: 30        # Eigen2 ROI_CONFIDENCE_MIN_TRADES
 roi_quality_threshold: 10.0          # Eigen2 ROI_QUALITY_THRESHOLD (min gain_pct for "quality" trade)
 
-# Cloud sync (reads CLOUD_PROVIDER / CLOUD_BUCKET / GOOGLE_APPLICATION_CREDENTIALS from env)
+# Cloud sync: CLOUD_PROVIDER / CLOUD_BUCKET / optional GOOGLE_APPLICATION_CREDENTIALS
+# (defaults to <repo-root>/gcs-credentials.json when present, e.g. /workspace/eigen3/gcs-credentials.json)
 cloud_project_name: "eigen3"         # Prefix inside the bucket (e.g. gs://bucket/eigen3/hall_of_fame/)
 
 

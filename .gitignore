@@ -93,6 +93,9 @@ temp/
 .env
 .env.local
 
+# GCS service account key (expected at repo root; see QUICK_START.md)
+gcs-credentials.json
+
 # Documentation builds
 docs/_build/
 docs/_static/

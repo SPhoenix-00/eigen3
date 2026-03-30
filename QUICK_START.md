@@ -9,7 +9,7 @@ with GCS-backed Hall of Fame persistence.
 
 | Setting | Recommended value |
 |---------|-------------------|
-| **GPU** | 1x A100 80 GB (or A6000 48 GB for budget runs) |
+| **GPU** | 1x **H100 SXM 80 GB** (best throughput) or A100 80 GB (or A6000 48 GB for budget runs) |
 | **Template** | RunPod PyTorch 2.x / CUDA 12.x (any Linux image with CUDA 12 drivers) |
 | **Disk** | 50 GB container + 20 GB volume (`/workspace`) |
 | **Python** | 3.10 or 3.11 (pre-installed in most templates) |
@@ -107,10 +107,11 @@ they survive across pods and runs.
 
 ### a. Upload your service-account key
 
+Place the key in the **repo root** on the pod (same folder as `scripts/`):
+
 ```bash
-mkdir -p /workspace/credentials
 # scp or paste your key file:
-scp -P <port> eigen3-sa-key.json root@<pod-ip>:/workspace/credentials/
+scp -P <port> gcs-credentials.json root@<pod-ip>:/workspace/eigen3/
 ```
 
 ### b. Set environment variables
@@ -119,11 +120,15 @@ Add these to your shell (or append to `~/.bashrc` for persistence):
 
 ```bash
 export CLOUD_PROVIDER=gcs
-export CLOUD_BUCKET=<your-gcs-bucket-name>
-export GOOGLE_APPLICATION_CREDENTIALS=/workspace/credentials/eigen3-sa-key.json
+export CLOUD_BUCKET=eigen3-checkpoints-ase0
+export GOOGLE_APPLICATION_CREDENTIALS=/workspace/eigen3/gcs-credentials.json
 ```
 
-> Without these variables the HoF still works — it just saves locally under
+If `gcs-credentials.json` sits at `/workspace/eigen3/gcs-credentials.json`, Eigen3’s
+`CloudSync.from_env()` will pick it up automatically when `GOOGLE_APPLICATION_CREDENTIALS`
+is unset — but setting the variable explicitly (as above) is still recommended.
+
+> Without `CLOUD_PROVIDER=gcs` and a bucket, the HoF still works — it just saves locally under
 > `checkpoints/hall_of_fame/` and won't sync across machines.
 
 ### c. Verify connectivity
@@ -221,6 +226,7 @@ python scripts/train.py env.data_path=Eigen3_Processed_OUTPUT.pkl
 
 ```
 eigen3/
+├── gcs-credentials.json         # GCS service-account key (gitignored locally; upload on the pod)
 ├── configs/
 │   ├── config.yaml              # top-level Hydra config
 │   ├── agent/trading_erl.yaml   # DDPG + network architecture

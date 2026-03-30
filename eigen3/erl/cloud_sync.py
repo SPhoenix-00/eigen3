@@ -7,7 +7,9 @@ Hall of Fame (upload, download, delete, exists, verified upload).
 Environment variables (GCS):
     CLOUD_PROVIDER   = "gcs"
     CLOUD_BUCKET     = "<bucket-name>"
-    GOOGLE_APPLICATION_CREDENTIALS = "<path-to-service-account-key.json>"
+    GOOGLE_APPLICATION_CREDENTIALS — optional path to the service-account JSON.
+    When unset with CLOUD_PROVIDER=gcs, from_env() uses repo-root/gcs-credentials.json
+    if that file exists (repo root is the parent of the eigen3 package directory).
 """
 
 from __future__ import annotations
@@ -82,6 +84,10 @@ class CloudSync:
         provider = os.environ.get("CLOUD_PROVIDER", "local").lower()
         bucket = os.environ.get("CLOUD_BUCKET")
         creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if not creds and provider == "gcs":
+            default_key = Path(__file__).resolve().parents[2] / "gcs-credentials.json"
+            if default_key.is_file():
+                creds = str(default_key)
         if provider not in ("gcs", "local"):
             logger.warning("Unsupported CLOUD_PROVIDER=%s, using local", provider)
             provider = "local"
