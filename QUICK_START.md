@@ -49,7 +49,7 @@ Options:
 - put your `.pkl` or `.csv` in repo root with that name, or
 - override on run: `python main.py env.data_path=/path/to/file.pkl`
 
-If data is missing, training falls back to synthetic data.
+Training **requires** a valid file at `env.data_path` (supported Eigen2 bundle or mono table). If the path is missing or invalid, training raises an error (no synthetic fallback). The standalone `scripts/evaluate.py` can still use synthetic data when no file is found, for quick demos only.
 
 ## 4) Train (recommended)
 
@@ -74,17 +74,19 @@ python scripts/train.py population.pop_size=48
 
 ## 5) What gets written
 
+With `python main.py` (Eigen2-style compat mode), you always get:
+
 - `evaluation_results/training_log_<timestamp>.txt`
-- `evaluation_results/evaluation_<run>_<timestamp>.txt`
-- `evaluation_results/evaluation_<run>_<timestamp>.json`
-- `evaluation_results/summary_<run>_<timestamp>.csv`
-- `evaluation_results/trades_<run>_<timestamp>.csv`
-- `checkpoints/<run_name>/best_agent.msgpack`
-- `checkpoints/<run_name>/best_agent.meta.json`
-- `checkpoints/<run_name>/metrics_history.jsonl`
-- `checkpoints/<run_name>/run_summary.json`
-- `checkpoints/<run_name>/hall_of_fame/`
+- `checkpoints/<run_name>/metrics_history.jsonl` (one JSON line per generation)
+- `checkpoints/<run_name>/run_summary.json` (final)
+- `checkpoints/<run_name>/hall_of_fame/` (Hall of Fame; GCS when configured)
 - `last_run.json`
+
+**Compat checkpoints** (`best_agent.msgpack`, `best_agent.meta.json`, and the `evaluation_results/evaluation_*` / `summary_*` / `trades_*` bundles on each new best) are **off by default** (`population.save_checkpoints: false` in `configs/population/default.yaml`). Enable them when you need artifacts for `scripts/evaluate.py` or offline inspection:
+
+```bash
+python main.py population.save_checkpoints=true
+```
 
 ## 6) Quick verification
 
@@ -95,8 +97,8 @@ cat last_run.json
 
 ## 7) Explicit evaluation command
 
-Training already emits evaluation bundles on new run-best.  
-Run this only when you want an extra holdout pass:
+If you trained with `population.save_checkpoints=true`, each new best also writes the Eigen2-style evaluation bundle under `evaluation_results/`.  
+Run this only when you want an extra holdout pass (requires `best_agent.msgpack` from that setting):
 
 ```bash
 python scripts/evaluate.py \
@@ -106,6 +108,7 @@ python scripts/evaluate.py \
 
 ## 8) Common issues
 
+- No `checkpoints/<run_name>/best_agent.msgpack` after training -> enable `population.save_checkpoints=true` (default is off for lighter runs)
 - `ModuleNotFoundError: eigen3` -> run `pip install -e .`
 - `ModuleNotFoundError: evorl` -> run `pip install -e ./evorl`
 - `403 ... storage.buckets.get denied` -> use the GCS test above (no bucket metadata call), and ensure object permissions on the bucket
