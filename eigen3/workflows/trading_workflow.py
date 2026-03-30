@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from functools import partial
 import logging
+import os
 import time
 
 import numpy as np
@@ -33,6 +34,13 @@ from eigen3.agents import TradingNetworkParams, soft_target_update
 from eigen3.erl.hall_of_fame import HallOfFame
 
 logger = logging.getLogger(__name__)
+
+
+def _maybe_enable_jax_compile_logging() -> None:
+    """If ``EIGEN3_LOG_JAX_COMPILES=1``, log each XLA compile (helps when GPU shows 0% during long CPU compiles)."""
+    v = os.environ.get("EIGEN3_LOG_JAX_COMPILES", "").strip().lower()
+    if v in ("1", "true", "yes"):
+        jax.config.update("jax_log_compiles", True)
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +361,8 @@ class TradingERLWorkflow:
 
         self.hof = hall_of_fame
 
+        self._printed_train_compile_hint = False
+        _maybe_enable_jax_compile_logging()
         self._build_vmapped_fns()
 
     # ------------------------------------------------------------------
@@ -549,9 +559,12 @@ class TradingERLWorkflow:
         tau = self.agent.tau
         n_steps = self.config.gradient_steps_per_gen
 
-        total_actor_loss = jnp.array(0.0)
-        total_critic_loss = jnp.array(0.0)
-        total_mean_q = jnp.array(0.0)
+        # Accumulate in Python floats and block each step. A plain ``+=`` on JAX arrays in a
+        # Python loop defers work; the first ``float()`` at the end can fuse all steps and
+        # OOM (multi‑tens of GiB) when materializing metrics.
+        total_actor_loss_py = 0.0
+        total_critic_loss_py = 0.0
+        total_mean_q_py = 0.0
 
         for step in range(n_steps):
             key, sample_key, loss_key = random.split(key, 3)
@@ -560,10 +573,11 @@ class TradingERLWorkflow:
             loss_keys = random.split(loss_key, pop_size)
 
             all_losses = self._vmap_loss_all_agents(stacked_params, batch, loss_keys)
+            all_losses = jax.tree.map(jax.block_until_ready, all_losses)
 
-            total_actor_loss += jnp.mean(all_losses["actor_loss"])
-            total_critic_loss += jnp.mean(all_losses["critic_loss"])
-            total_mean_q += jnp.mean(all_losses["mean_q"])
+            total_actor_loss_py += float(jax.device_get(jnp.mean(all_losses["actor_loss"])))
+            total_critic_loss_py += float(jax.device_get(jnp.mean(all_losses["critic_loss"])))
+            total_mean_q_py += float(jax.device_get(jnp.mean(all_losses["mean_q"])))
 
             if (step + 1) % self.config.target_update_period == 0:
                 stacked_params = stacked_params.replace(
@@ -578,11 +592,12 @@ class TradingERLWorkflow:
                         stacked_params.critic_params,
                     ),
                 )
+                stacked_params = jax.block_until_ready(stacked_params)
 
         metrics = {
-            "actor_loss": float(total_actor_loss / n_steps),
-            "critic_loss": float(total_critic_loss / n_steps),
-            "mean_q": float(total_mean_q / n_steps),
+            "actor_loss": total_actor_loss_py / n_steps,
+            "critic_loss": total_critic_loss_py / n_steps,
+            "mean_q": total_mean_q_py / n_steps,
         }
         return stacked_params, metrics
 
@@ -864,11 +879,23 @@ class TradingERLWorkflow:
         t_collect_s = time.perf_counter() - t_collect_start
         print(f" {t_collect_s:.1f}s", flush=True)
 
+        # Ensure collect finished before training reads buffer (avoids odd stalls).
+        self._replay_buffer = jax.block_until_ready(self._replay_buffer)
+
         # Phase 2 — gradient updates (vmapped loss)
         print("  > Train...", end="", flush=True)
         t_train_start = time.perf_counter()
         grad_metrics: Dict[str, float] = {}
-        if self._replay_buffer.size >= self.config.batch_size:
+        buf_size = int(jax.device_get(self._replay_buffer.size))
+        if buf_size >= self.config.batch_size:
+            if not self._printed_train_compile_hint:
+                self._printed_train_compile_hint = True
+                print(
+                    "\n    [JAX] First training step compiles the vmapped loss on the CPU; "
+                    "GPU utilization may read 0% for several minutes. "
+                    "Set EIGEN3_LOG_JAX_COMPILES=1 to log each compile.",
+                    flush=True,
+                )
             self.key, grad_key = random.split(self.key)
             self._stacked_params, grad_metrics = self._gradient_update(
                 self._stacked_params, self._replay_buffer, grad_key,
