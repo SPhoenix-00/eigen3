@@ -695,7 +695,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
     settlement = int(_env_cfg("settlement_period_days", 0))
     ep_cal = OmegaConf.select(cfg, "env.episode_calendar_days", default=None)
     ep_cal_i = int(ep_cal) if ep_cal is not None else trading_days
-    val_mult = float(_env_cfg("validation_reserve_multiplier", 1.5))
+    val_mult = float(_env_cfg("validation_reserve_multiplier", 2.5))
 
     split = compute_train_val_holdout_split(
         num_days=num_days,

@@ -99,7 +99,7 @@ class TestDataLoaderInitialization:
         assert config.normalize is False
         assert config.context_window_days == 151
         assert config.trading_period_days == 364
-        assert config.validation_reserve_multiplier == 1.5
+        assert config.validation_reserve_multiplier == 2.5
         assert config.min_days == 1000
 
 

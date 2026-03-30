@@ -76,7 +76,7 @@ def compute_train_val_holdout_split(
     context_window_days: int,
     episode_calendar_days: int,
     settlement_period_days: int = 0,
-    validation_reserve_multiplier: float = 1.5,
+    validation_reserve_multiplier: float = 2.5,
 ) -> TrainValHoldoutSplit:
     """Compute train / validation / holdout row indices.
 

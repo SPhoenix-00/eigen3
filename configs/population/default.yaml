@@ -68,7 +68,7 @@ local_training_agent_batch_size: 8    # Single-GPU: agents per loss vmap chunk (
 
 
 # ---------- Validation ----------
-val_episodes: 2                       # Validation episodes per agent per generation (val data is ~1.5x episode wide)
+val_episodes: 2                       # Validation episodes per agent per generation (val band is ~2.5x episode wide)
 conservative_k: 1                     # Take the worst episode as the validation score (pessimistic)
 eval_interval: 50                     # Validate best agent every N generations
 eval_num_workers: 48                  # Eigen2 EVAL_NUM_WORKERS (actual = min(cpu_count-1, this))

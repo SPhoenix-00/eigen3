@@ -13,7 +13,7 @@ num_features_full: 9
 trading_period_days: 364
 settlement_period_days: 0
 # Validation band width = ceil(multiplier * last-episode trading rows), immediately before holdout
-validation_reserve_multiplier: 1.5
+validation_reserve_multiplier: 2.5
 # Optional: override calendar span only (defaults to trading_period_days)
 # episode_calendar_days: 364
 # 30 calendar days (resolved via dates_ordinal array, not row count)

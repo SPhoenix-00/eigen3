@@ -68,7 +68,7 @@ def parse_args():
     parser.add_argument("--investable_start_col", type=int, default=0)
     parser.add_argument("--mono_num_channels", type=int, default=18)
     parser.add_argument("--mono_csv_header", type=int, default=0)
-    parser.add_argument("--validation_reserve_multiplier", type=float, default=1.5)
+    parser.add_argument("--validation_reserve_multiplier", type=float, default=2.5)
     parser.add_argument("--min_sale_target", type=float, default=10.0)
     parser.add_argument("--max_sale_target", type=float, default=50.0)
     parser.add_argument("--hurdle_rate", type=float, default=0.005)

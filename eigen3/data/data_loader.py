@@ -49,7 +49,7 @@ class DataConfig:
     trading_period_days: int = 364
     settlement_period_days: int = 0
     episode_calendar_days: Optional[int] = None
-    validation_reserve_multiplier: float = 1.5
+    validation_reserve_multiplier: float = 2.5
     normalize: bool = False  # Eigen2 uses identity norm; Instance Norm in FeatureExtractor
     min_days: int = 1000
 
