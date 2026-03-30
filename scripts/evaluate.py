@@ -8,11 +8,11 @@ are saved as JSON and optionally printed to the console.
 import argparse
 import json
 import logging
-import sys
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 import numpy as np
 
 from eigen3.data import load_trading_data, create_synthetic_data
@@ -68,8 +68,13 @@ def parse_args():
     parser.add_argument("--conviction_scaling_power", type=float, default=1.0)
     parser.add_argument("--episode_reward_multiplier", type=float, default=1.0)
 
-    # Network architecture (must match checkpoint)
+    # Network architecture (must match training / checkpoint)
     parser.add_argument("--chunk_size", type=int, default=64)
+    parser.add_argument(
+        "--no-remat",
+        action="store_true",
+        help="Set use_remat=False on Actor/DoubleCritic (default matches train: remat on).",
+    )
 
     return parser.parse_args()
 
@@ -84,11 +89,12 @@ def _load_checkpoint(path: str, agent: TradingAgent, agent_state):
         data = np.load(str(ckpt_path), allow_pickle=True)
         params = data["params"].item()
         from eigen3.agents import TradingNetworkParams
+        tm = getattr(jax.tree, "map", None) or jtu.tree_map
         loaded = TradingNetworkParams(
-            actor_params=jax.tree.map(jnp.array, params["actor_params"]),
-            critic_params=jax.tree.map(jnp.array, params["critic_params"]),
-            target_actor_params=jax.tree.map(jnp.array, params["target_actor_params"]),
-            target_critic_params=jax.tree.map(jnp.array, params["target_critic_params"]),
+            actor_params=tm(jnp.array, params["actor_params"]),
+            critic_params=tm(jnp.array, params["critic_params"]),
+            target_actor_params=tm(jnp.array, params["target_actor_params"]),
+            target_critic_params=tm(jnp.array, params["target_critic_params"]),
         )
     else:
         from flax.serialization import from_bytes
@@ -212,13 +218,14 @@ def main():
     # --- Build agent & load checkpoint ---
     nc = int(data_obs.shape[1])
     nf = int(data_obs.shape[2])
+    use_remat = not args.no_remat
     actor = Actor(
         num_columns=nc,
         num_features=nf,
         num_investable_stocks=args.num_investable_stocks,
         investable_start_col=args.investable_start_col,
         column_chunk_size=args.chunk_size,
-        use_remat=False,
+        use_remat=use_remat,
         min_sale_target=args.min_sale_target,
         max_sale_target=args.max_sale_target,
     )
@@ -227,7 +234,7 @@ def main():
         num_features=nf,
         num_investable_stocks=args.num_investable_stocks,
         column_chunk_size=args.chunk_size,
-        use_remat=False,
+        use_remat=use_remat,
     )
     agent = TradingAgent(actor_network=actor, critic_network=critic)
 

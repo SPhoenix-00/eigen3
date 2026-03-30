@@ -9,8 +9,10 @@ defaults:
 # Random seed
 seed: 42
 
-# Device configuration
-device: "cuda"  # "cuda", "cpu", or "tpu"
+# Device configuration (informational: scripts/train.py does not read this yet).
+# JAX uses whatever backends jaxlib provides — install jax[cuda12] for GPU or
+# jax[cpu] for CPU-only servers. Override with CUDA_VISIBLE_DEVICES on the host.
+device: "cuda"
 num_devices: 1
 
 # Checkpoint and logging directories
