@@ -316,6 +316,7 @@ class TradingWorkflowConfig:
     steps_per_agent: int = 100
     gradient_vmap_chunk_size: Optional[int] = None
     forced_exploration_buffer_pct: float = 0.5  # Do forced exploration until buffer is this % full
+    bnh_penalty_warmup_gens: int = 5  # Gradually introduce BnH penalty over these generations after forced exploration ends
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +426,9 @@ class TradingERLWorkflow:
             key: chex.PRNGKey,
             num_steps: chex.Array,
             force_explore: chex.Array,
+            bnh_multiplier: chex.Array,
+            loss_penalty_multiplier: chex.Array,
+            action_bonus: chex.Array,
         ):
             """Single compiled rollout: vmap over agents × ``fori_loop`` over time steps.
 
@@ -439,9 +443,36 @@ class TradingERLWorkflow:
                 all_actions = jax.vmap(lambda p, o, k: _compute_action_one(p, o, k, force_explore))(
                     stacked_params, env_states.obs, action_keys,
                 )
+                
+                # Apply dynamic curriculum multipliers to environment state before step
+                env_states = env_states.replace(
+                    env_state=env_states.env_state.replace(
+                        loss_penalty_multiplier=jnp.full_like(env_states.env_state.loss_penalty_multiplier, loss_penalty_multiplier),
+                        action_bonus=jnp.full_like(env_states.env_state.action_bonus, action_bonus),
+                    )
+                )
+                
+                # Apply bnh_multiplier directly inside the jitted loop so it propagates to step_reward
+                # We need to map it into step logic without redefining env.step.
+                # Actually, the environment computes bonus independently. Let's patch TradingEnvState 
+                # temporarily, or redefine env.step to take bnh_multiplier?
+                # Better: we just compute next_states, then manually scale the benchmark excess portion
+                # of the reward. 
+                
                 next_states = jax.vmap(lambda s, a: env.step(s, a))(
                     env_states, all_actions,
                 )
+                
+                # Multiply the *done* bonus by bnh_multiplier (since it was just added in step)
+                # Next state reward already has it. We subtract it out, then add it back scaled.
+                # Next states `episode_benchmark_excess` holds the exact value.
+                # reward = trade_reward + jnp.where(done, bonus, 0.0)
+                # We want: reward = trade_reward + jnp.where(done, bonus * bnh_multiplier, 0.0)
+                
+                # So we subtract the unscaled bonus and add the scaled one:
+                adjusted_reward = next_states.reward - jnp.where(next_states.done, next_states.env_state.episode_benchmark_excess, 0.0) + jnp.where(next_states.done, next_states.env_state.episode_benchmark_excess * bnh_multiplier, 0.0)
+                
+                next_states = next_states.replace(reward=adjusted_reward)
                 buf = buffer_insert_batch(
                     buf,
                     obs=env_states.obs,
@@ -540,6 +571,9 @@ class TradingERLWorkflow:
         key: chex.PRNGKey,
         num_steps: int,
         force_explore: bool,
+        bnh_multiplier: float,
+        loss_penalty_multiplier: float,
+        action_bonus: float,
     ) -> Tuple[Any, ReplayBufferState, chex.PRNGKey, chex.Array]:
         """Collect ``num_steps`` transitions for ALL agents in parallel.
 
@@ -553,6 +587,9 @@ class TradingERLWorkflow:
             key,
             jnp.asarray(int(num_steps), dtype=jnp.int32),
             jnp.asarray(force_explore, dtype=jnp.bool_),
+            jnp.asarray(bnh_multiplier, dtype=jnp.float32),
+            jnp.asarray(loss_penalty_multiplier, dtype=jnp.float32),
+            jnp.asarray(action_bonus, dtype=jnp.float32),
         )
         return env_states, buf, key, total_reward
 
@@ -879,6 +916,10 @@ class TradingERLWorkflow:
             t_init_s = time.perf_counter() - t_init_start
             print(f" {t_init_s:.1f}s", flush=True)
 
+        # Tracking state to linearly ramp up BnH penalty after forced exploration
+        if not hasattr(self, "_forced_exploration_ended_gen"):
+            self._forced_exploration_ended_gen = -1
+
         # Phase 1 — collect experience (vmapped)
         buffer_pct = 0.0
         if self._replay_buffer is not None:
@@ -886,10 +927,39 @@ class TradingERLWorkflow:
 
         is_forced_explore = buffer_pct < self.config.forced_exploration_buffer_pct
 
+        # Default values from environment
+        base_loss_multiplier = float(getattr(self.env, "loss_penalty_multiplier", 1.25))
+
         if is_forced_explore:
-            print("  > Collect (forced exploration > 1.0)...", end="", flush=True)
+            print(f"  > Collect (forced exploration > 1.0; buffer {buffer_pct*100:.1f}%)...", end="", flush=True)
+            self._forced_exploration_ended_gen = -1  # Reset if we somehow dip back
+            bnh_multiplier = 0.0
+            loss_penalty_multiplier = 0.0
+            
+            # Action bonus for first half of forced exploration
+            half_explore_pct = self.config.forced_exploration_buffer_pct / 2.0
+            if buffer_pct < half_explore_pct:
+                bonus_progress = float(buffer_pct / half_explore_pct)
+                action_bonus = 100.0 * (1.0 - bonus_progress)
+            else:
+                action_bonus = 0.0
         else:
-            print("  > Collect...", end="", flush=True)
+            if self._forced_exploration_ended_gen == -1:
+                self._forced_exploration_ended_gen = self.generation
+            
+            gens_since_end = self.generation - self._forced_exploration_ended_gen
+            
+            if gens_since_end < self.config.bnh_penalty_warmup_gens:
+                warmup_progress = float(gens_since_end) / float(self.config.bnh_penalty_warmup_gens)
+                bnh_multiplier = warmup_progress
+                loss_penalty_multiplier = base_loss_multiplier * warmup_progress
+                print(f"  > Collect (warm-up penalties {warmup_progress:.2f}x)...", end="", flush=True)
+            else:
+                bnh_multiplier = 1.0
+                loss_penalty_multiplier = base_loss_multiplier
+                print("  > Collect...", end="", flush=True)
+                
+            action_bonus = 0.0
             
         t_collect_start = time.perf_counter()
         self.key, collect_key = random.split(self.key)
@@ -901,6 +971,9 @@ class TradingERLWorkflow:
                 collect_key,
                 self.config.steps_per_agent,
                 is_forced_explore,
+                bnh_multiplier,
+                loss_penalty_multiplier,
+                action_bonus,
             )
         )
         self.total_env_steps += self.config.steps_per_agent * self._pop_size

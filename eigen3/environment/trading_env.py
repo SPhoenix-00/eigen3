@@ -52,6 +52,10 @@ class TradingEnvState(PyTreeData):
     # One-shot terminal term: agent vs equal-weight buy-hold (scaled $), same as episode bonus in reward
     episode_benchmark_excess: chex.Array  # scalar float; 0 until the terminal step
 
+    # Dynamic multipliers for curriculum learning
+    loss_penalty_multiplier: chex.Array = pytree_field(default_factory=lambda: jnp.array(1.25, dtype=jnp.float32))
+    action_bonus: chex.Array = pytree_field(default_factory=lambda: jnp.array(0.0, dtype=jnp.float32))
+
     # RNG for observation noise (Eigen2: multiplicative noise when is_training)
     rng_key: chex.Array = pytree_field(default_factory=lambda: jnp.zeros((2,), dtype=jnp.uint32))
 
@@ -312,6 +316,8 @@ class TradingEnv(Env):
             peak_capital_employed=jnp.array(0.0, dtype=jnp.float32),
             total_pnl=jnp.array(0.0, dtype=jnp.float32),
             episode_benchmark_excess=jnp.array(0.0, dtype=jnp.float32),
+            loss_penalty_multiplier=jnp.array(self.loss_penalty_multiplier, dtype=jnp.float32),
+            action_bonus=jnp.array(0.0, dtype=jnp.float32),
             rng_key=rng_key,
         )
 
@@ -393,8 +399,12 @@ class TradingEnv(Env):
         done = new_step >= env_state.end_step
 
         # 6. Episode-level bonus/penalty (agent PnL vs buy-and-hold benchmark)
+        # Suppress the BNH bonus during forced exploration, scaling it up from 0 to 1 over a few generations.
         episode_bonus = self._compute_episode_bonus(env_state, new_total_pnl, new_peak)
-        step_reward = step_reward + jnp.where(done, episode_bonus, 0.0)
+        
+        # We multiply by episode_reward_multiplier which can be dynamically adjusted
+        step_reward = step_reward + jnp.where(done, episode_bonus * self.episode_reward_multiplier, 0.0)
+        
         # Persist for metrics / HoF: same episode-wide scalar folded into reward on ``done``
         new_benchmark_excess = jnp.where(done, episode_bonus, jnp.zeros_like(episode_bonus))
 
@@ -483,6 +493,7 @@ class TradingEnv(Env):
         entry_price: chex.Array,
         exit_price: chex.Array,
         coefficient: chex.Array,
+        loss_penalty_multiplier: chex.Array,
     ) -> chex.Array:
         """Reward for closing one lot (hurdle + conviction scaling)."""
         gain_pct = ((exit_price - entry_price) / entry_price) * 100.0
@@ -492,7 +503,7 @@ class TradingEnv(Env):
         return jnp.where(
             net_gain_pct >= 0,
             scaled_coef * net_gain_pct,
-            scaled_coef * net_gain_pct * self.loss_penalty_multiplier,
+            scaled_coef * net_gain_pct * loss_penalty_multiplier,
         )
 
     def _compute_episode_bonus(
@@ -538,7 +549,7 @@ class TradingEnv(Env):
         active_bnh = peak_capital * avg_return
         idle_bnh = jnp.sum(jnp.where(valid, end_prices - start_prices, 0.0))
         benchmark_pnl = jnp.where(peak_capital > 0, active_bnh, idle_bnh)
-        return (total_pnl - benchmark_pnl) * self.episode_reward_multiplier
+        return (total_pnl - benchmark_pnl)
 
     def episode_buyhold_excess_usd(self, state: EnvState) -> jnp.ndarray:
         """Episode-wide buy-hold excess (scaled $): the terminal bonus term from :meth:`step`.
@@ -603,7 +614,7 @@ class TradingEnv(Env):
 
                 pos_reward = jax.lax.select(
                     should_exit,
-                    self._gain_reward_scalar(entry_price, exit_price, coefficient),
+                    self._gain_reward_scalar(entry_price, exit_price, coefficient, env_state.loss_penalty_multiplier),
                     0.0,
                 )
 
@@ -683,7 +694,7 @@ class TradingEnv(Env):
             valid = jnp.isfinite(price)
             exit_price = jnp.where(valid, price, entry_price)
 
-            r = jnp.where(do, self._gain_reward_scalar(entry_price, exit_price, coefficient), 0.0)
+            r = jnp.where(do, self._gain_reward_scalar(entry_price, exit_price, coefficient, env_state.loss_penalty_multiplier), 0.0)
             gain_pct = jnp.where(do, ((exit_price - entry_price) / entry_price) * 100.0, 0.0)
             w_add = jnp.where(do & (gain_pct > 0), jnp.int32(1), jnp.int32(0))
             l_add = jnp.where(do & (gain_pct <= 0), jnp.int32(1), jnp.int32(0))
@@ -824,7 +835,7 @@ class TradingEnv(Env):
             # Insert position
             new_positions = positions.at[slot_idx].set(new_position)
 
-            return new_positions, 0.0, True
+            return new_positions, env_state.action_bonus, True
 
         def no_action_branch():
             """No position opened"""
