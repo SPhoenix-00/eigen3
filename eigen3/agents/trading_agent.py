@@ -7,7 +7,7 @@ Implements the EvoRL Agent interface with:
 - Soft target updates
 """
 
-from typing import Tuple, Optional
+from typing import Any, Tuple, Optional
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
@@ -30,6 +30,31 @@ class TradingNetworkParams(PyTreeData):
     critic_params: chex.ArrayTree
     target_actor_params: chex.ArrayTree
     target_critic_params: chex.ArrayTree
+
+
+def params_for_flax_msgpack(params: Any) -> Any:
+    """Plain dict for ``flax.serialization.to_bytes`` (msgpack cannot encode PyTreeData)."""
+    if isinstance(params, TradingNetworkParams):
+        return {
+            "actor_params": params.actor_params,
+            "critic_params": params.critic_params,
+            "target_actor_params": params.target_actor_params,
+            "target_critic_params": params.target_critic_params,
+        }
+    return params
+
+
+def trading_params_from_msgpack_bytes(raw: bytes, template: TradingNetworkParams) -> TradingNetworkParams:
+    """Load weights saved via :func:`params_for_flax_msgpack` and ``flax.serialization.to_bytes``."""
+    from flax.serialization import from_bytes
+
+    loaded = from_bytes(params_for_flax_msgpack(template), raw)
+    return TradingNetworkParams(
+        actor_params=loaded["actor_params"],
+        critic_params=loaded["critic_params"],
+        target_actor_params=loaded["target_actor_params"],
+        target_critic_params=loaded["target_critic_params"],
+    )
 
 
 class TradingAgent(Agent):

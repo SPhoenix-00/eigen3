@@ -17,7 +17,7 @@ import jax
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
-from eigen3.agents import TradingAgent
+from eigen3.agents import TradingAgent, params_for_flax_msgpack
 from eigen3.config import (
     DEFAULT_CONVICTION_SCALING_POWER,
     DEFAULT_EPISODE_REWARD_MULTIPLIER,
@@ -108,7 +108,7 @@ class CompatArtifactManager:
     def save_best_agent(self, params: Any, generation: int, score: float) -> Path:
         from flax.serialization import to_bytes
 
-        self.best_agent_path.write_bytes(to_bytes(params))
+        self.best_agent_path.write_bytes(to_bytes(params_for_flax_msgpack(params)))
         with self.best_meta_path.open("w", encoding="utf-8") as f:
             json.dump(
                 {
@@ -736,79 +736,84 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
         _phase_log("Phase 4: Training Loop")
     all_metrics: list[dict[str, Any]] = []
     best_score = float("-inf")
-    for gen in range(num_gen):
-        metrics = workflow.run_generation()
-        if log_vram and should_log_gpu_memory_this_generation(vram_interval, gen):
-            log_gpu_memory_report(logger, f"after generation {gen + 1}/{num_gen}")
-        all_metrics.append(metrics)
-        print(
-            f"Generation {gen + 1}/{num_gen}  "
-            f"Mean: {metrics['mean_fitness']:.2f}  "
-            f"Max: {metrics['max_fitness']:.2f}  "
-            f"Min: {metrics['min_fitness']:.2f}  "
-            f"Steps: {metrics['total_env_steps']}"
-        )
-        if artifact_mgr is not None:
-            artifact_mgr.append_metric(metrics)
-            score = float(metrics.get("max_fitness", float("-inf")))
-            if score > best_score:
-                best_score = score
-                best_params = workflow.get_last_best_agent()
-                best_path = artifact_mgr.save_best_agent(
-                    best_params,
-                    generation=int(metrics.get("generation", gen + 1)),
-                    score=score,
-                )
-                eval_payload = _evaluate_agent_on_env(
-                    env=val_env,
-                    agent=agent,
-                    params=best_params,
-                    seed=int(cfg.seed) + gen + 1000,
-                    num_episodes=min(3, int(OmegaConf.select(cfg, "population.eval_episodes", 5))),
-                )
-                eval_payload["run_name"] = run_name
-                eval_payload["generation"] = int(metrics.get("generation", gen + 1))
-                eval_paths = artifact_mgr.write_evaluation_bundle(eval_payload)
-                logger.info(
-                    "New best (gen=%s score=%.6f) saved to %s | eval: %s",
-                    metrics.get("generation", gen + 1),
-                    score,
-                    best_path,
-                    eval_paths["json"],
-                )
-
-    last = all_metrics[-1] if all_metrics else {}
-    logger.info(
-        "Training finished. Last generation: mean_fitness=%.4f max_fitness=%.4f "
-        "total_env_steps=%s",
-        last.get("mean_fitness", float("nan")),
-        last.get("max_fitness", float("nan")),
-        last.get("total_env_steps", "?"),
-    )
-
-    out_dir: str | None = None
+    last: dict[str, Any] = {}
     try:
-        from hydra.core.hydra_config import HydraConfig
+        for gen in range(num_gen):
+            metrics = workflow.run_generation()
+            if log_vram and should_log_gpu_memory_this_generation(vram_interval, gen):
+                log_gpu_memory_report(logger, f"after generation {gen + 1}/{num_gen}")
+            all_metrics.append(metrics)
+            print(
+                f"Generation {gen + 1}/{num_gen}  "
+                f"Mean: {metrics['mean_fitness']:.2f}  "
+                f"Max: {metrics['max_fitness']:.2f}  "
+                f"Min: {metrics['min_fitness']:.2f}  "
+                f"Steps: {metrics['total_env_steps']}"
+            )
+            if artifact_mgr is not None:
+                artifact_mgr.append_metric(metrics)
+                score = float(metrics.get("max_fitness", float("-inf")))
+                if score > best_score:
+                    best_score = score
+                    best_params = workflow.get_last_best_agent()
+                    best_path = artifact_mgr.save_best_agent(
+                        best_params,
+                        generation=int(metrics.get("generation", gen + 1)),
+                        score=score,
+                    )
+                    eval_payload = _evaluate_agent_on_env(
+                        env=val_env,
+                        agent=agent,
+                        params=best_params,
+                        seed=int(cfg.seed) + gen + 1000,
+                        num_episodes=min(3, int(OmegaConf.select(cfg, "population.eval_episodes", 5))),
+                    )
+                    eval_payload["run_name"] = run_name
+                    eval_payload["generation"] = int(metrics.get("generation", gen + 1))
+                    eval_paths = artifact_mgr.write_evaluation_bundle(eval_payload)
+                    logger.info(
+                        "New best (gen=%s score=%.6f) saved to %s | eval: %s",
+                        metrics.get("generation", gen + 1),
+                        score,
+                        best_path,
+                        eval_paths["json"],
+                    )
 
-        out_dir = HydraConfig.get().runtime.output_dir
-        logger.info("Hydra output directory: %s", out_dir)
-    except Exception:
-        pass
-
-    use_tb = OmegaConf.select(cfg, "logging.use_tensorboard", default=False)
-    if use_tb:
-        tb_dir = OmegaConf.select(cfg, "logging.tensorboard_log_dir", default="")
-        if tb_dir:
-            logger.info("TensorBoard: tensorboard --logdir %s", tb_dir)
-
-    if artifact_mgr is not None:
-        if compat_mode:
-            _phase_log("Phase 5: Finalization")
-        artifact_mgr.write_last_run()
-        artifact_mgr.write_run_summary(
-            last_metrics=last,
-            hydra_output_dir=out_dir,
-            config_yaml=OmegaConf.to_yaml(cfg, resolve=True),
+        last = all_metrics[-1] if all_metrics else {}
+        logger.info(
+            "Training finished. Last generation: mean_fitness=%.4f max_fitness=%.4f "
+            "total_env_steps=%s",
+            last.get("mean_fitness", float("nan")),
+            last.get("max_fitness", float("nan")),
+            last.get("total_env_steps", "?"),
         )
 
-    return all_metrics
+        out_dir: str | None = None
+        try:
+            from hydra.core.hydra_config import HydraConfig
+
+            out_dir = HydraConfig.get().runtime.output_dir
+            logger.info("Hydra output directory: %s", out_dir)
+        except Exception:
+            pass
+
+        use_tb = OmegaConf.select(cfg, "logging.use_tensorboard", default=False)
+        if use_tb:
+            tb_dir = OmegaConf.select(cfg, "logging.tensorboard_log_dir", default="")
+            if tb_dir:
+                logger.info("TensorBoard: tensorboard --logdir %s", tb_dir)
+
+        if artifact_mgr is not None:
+            if compat_mode:
+                _phase_log("Phase 5: Finalization")
+            artifact_mgr.write_last_run()
+            artifact_mgr.write_run_summary(
+                last_metrics=last,
+                hydra_output_dir=out_dir,
+                config_yaml=OmegaConf.to_yaml(cfg, resolve=True),
+            )
+
+        return all_metrics
+    finally:
+        if hof.cloud_sync is not None:
+            hof.cloud_sync.shutdown()

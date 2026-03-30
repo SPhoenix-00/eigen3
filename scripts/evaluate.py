@@ -105,9 +105,10 @@ def _load_checkpoint(path: str, agent: TradingAgent, agent_state):
             target_critic_params=tm(jnp.array, params["target_critic_params"]),
         )
     else:
-        from flax.serialization import from_bytes
+        from eigen3.agents.trading_agent import trading_params_from_msgpack_bytes
+
         raw = ckpt_path.read_bytes()
-        loaded = from_bytes(agent_state.params, raw)
+        loaded = trading_params_from_msgpack_bytes(raw, agent_state.params)
 
     from evorl.agent import AgentState
     return AgentState(params=loaded)

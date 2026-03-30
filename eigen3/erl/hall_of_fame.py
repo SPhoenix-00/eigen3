@@ -23,7 +23,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from eigen3.agents.trading_agent import TradingNetworkParams
+from eigen3.agents.trading_agent import (
+    TradingNetworkParams,
+    params_for_flax_msgpack,
+    trading_params_from_msgpack_bytes,
+)
 from eigen3.erl.cloud_sync import CloudSync
 
 logger = logging.getLogger(__name__)
@@ -75,24 +79,12 @@ class HallOfFameEntry:
 # ---------------------------------------------------------------------------
 
 
-def _params_to_msgpack_tree(params: Any) -> Any:
-    """``flax.serialization.to_bytes`` cannot encode ``PyTreeData`` subclasses."""
-    if isinstance(params, TradingNetworkParams):
-        return {
-            "actor_params": params.actor_params,
-            "critic_params": params.critic_params,
-            "target_actor_params": params.target_actor_params,
-            "target_critic_params": params.target_critic_params,
-        }
-    return params
-
-
 def _save_params(params: Any, path: Path) -> None:
     """Serialise a Flax/JAX param pytree to *path* (msgpack)."""
     from flax.serialization import to_bytes
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    raw = to_bytes(_params_to_msgpack_tree(params))
+    raw = to_bytes(params_for_flax_msgpack(params))
     path.write_bytes(raw)
 
 
@@ -102,14 +94,7 @@ def _load_params(path: Path, target: Any) -> Any:
 
     raw = path.read_bytes()
     if isinstance(target, TradingNetworkParams):
-        tmpl = _params_to_msgpack_tree(target)
-        loaded = from_bytes(tmpl, raw)
-        return TradingNetworkParams(
-            actor_params=loaded["actor_params"],
-            critic_params=loaded["critic_params"],
-            target_actor_params=loaded["target_actor_params"],
-            target_critic_params=loaded["target_critic_params"],
-        )
+        return trading_params_from_msgpack_bytes(raw, target)
     return from_bytes(target, raw)
 
 
