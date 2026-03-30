@@ -79,8 +79,8 @@ skip_reevaluation_on_resume: true     # Skip re-eval on resume unless reward fun
 # Env steps collected per agent per generation (before gradient updates).
 # ~320 aligns with a typical calendar episode length (mono); was 100 (too thin per gen).
 steps_per_agent: 320
-total_generations: 100                # Eigen2 NUM_GENERATIONS (gauntlet may stop earlier)
-max_generations_gauntlet: 100         # Eigen2 MAX_GENERATIONS_GAUNTLET — hard ceiling
+total_generations: 500                # Eigen2 NUM_GENERATIONS (gauntlet may stop earlier)
+max_generations_gauntlet: 500         # Eigen2 MAX_GENERATIONS_GAUNTLET — hard ceiling
 save_interval: 1                      # Eigen2 SAVE_FREQUENCY (1 = every gen for safety)
 log_interval: 1                       # Eigen2 LOG_FREQUENCY
 

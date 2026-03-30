@@ -382,10 +382,20 @@ class TradingERLWorkflow:
         val_env = self.val_env
         agent = self.agent
 
-        def _compute_action_one(params, obs, key):
+        def _compute_action_one(params, obs, key, generation):
             state = AgentState(params=params)
             actions, _ = agent.compute_actions(state, SampleBatch(obs=obs[None]), key)
-            return actions[0]
+            act = actions[0]
+
+            def override_fn():
+                # Force random coefficients between 1.1 and 3.0
+                rand_coeff = jax.random.uniform(key, (act.shape[0],), minval=1.1, maxval=3.0)
+                return act.at[:, 0].set(rand_coeff)
+
+            def normal_fn():
+                return act
+
+            return jax.lax.cond(generation < 5, override_fn, normal_fn)
 
         def _eval_action_one(params, obs, key):
             state = AgentState(params=params)
@@ -413,6 +423,7 @@ class TradingERLWorkflow:
             buf: ReplayBufferState,
             key: chex.PRNGKey,
             num_steps: chex.Array,
+            generation: chex.Array,
         ):
             """Single compiled rollout: vmap over agents × ``fori_loop`` over time steps.
 
@@ -424,7 +435,7 @@ class TradingERLWorkflow:
                 env_states, buf, key, total_reward = carry
                 key, step_key, reset_key = random.split(key, 3)
                 action_keys = random.split(step_key, pop_size_int)
-                all_actions = jax.vmap(_compute_action_one)(
+                all_actions = jax.vmap(lambda p, o, k: _compute_action_one(p, o, k, generation))(
                     stacked_params, env_states.obs, action_keys,
                 )
                 next_states = jax.vmap(lambda s, a: env.step(s, a))(
@@ -527,6 +538,7 @@ class TradingERLWorkflow:
         buf: ReplayBufferState,
         key: chex.PRNGKey,
         num_steps: int,
+        generation: int,
     ) -> Tuple[Any, ReplayBufferState, chex.PRNGKey, chex.Array]:
         """Collect ``num_steps`` transitions for ALL agents in parallel.
 
@@ -539,6 +551,7 @@ class TradingERLWorkflow:
             buf,
             key,
             jnp.asarray(int(num_steps), dtype=jnp.int32),
+            jnp.asarray(int(generation), dtype=jnp.int32),
         )
         return env_states, buf, key, total_reward
 
@@ -876,6 +889,7 @@ class TradingERLWorkflow:
                 self._replay_buffer,
                 collect_key,
                 self.config.steps_per_agent,
+                self.generation,
             )
         )
         self.total_env_steps += self.config.steps_per_agent * self._pop_size
