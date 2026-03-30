@@ -641,6 +641,13 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
     logger.info("Setting random seed: %s", cfg.seed)
     key = jax.random.PRNGKey(int(cfg.seed))
 
+    # If this shows backend=cpu, training uses no GPU (wrong jax[cuda] wheel or JAX_PLATFORMS=cpu).
+    logger.info(
+        "JAX: default_backend=%s devices=%s",
+        jax.default_backend(),
+        [str(d) for d in jax.devices()],
+    )
+
     if compat_mode:
         _phase_log("Phase 1: Data Loading")
     data_path = OmegaConf.select(cfg, "env.data_path", default="data/raw")
