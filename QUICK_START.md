@@ -89,11 +89,19 @@ scp -P <port> Eigen3_Processed_OUTPUT.pkl root@<pod-ip>:/workspace/eigen3/
 # Or use RunPod's file manager in the web UI.
 ```
 
-The default Hydra config (`configs/env/trading_mono.yaml`) looks for
-`env.data_path`. You can either:
+Training reads **`env.data_path`** from `configs/env/trading_mono.yaml`
+(default: `Eigen3_Processed_OUTPUT.pkl` in the **repo root**). `scripts/train.py`
+resolves that path against your real working directory (Hydra’s output folder
+does not break relative paths).
 
-- Place the file where the config expects it, **or**
-- Override on the command line (see Step 8).
+- Put the pickle (or CSV) in the repo root next to `scripts/`, **or** edit
+  `data_path` in `configs/env/trading_mono.yaml`, **or** override once:
+  `python scripts/train.py env.data_path=/path/to/table.pkl`.
+
+If you build the table on the pod with **`python process_eigen_data.py`**
+(from the repo root), the script **rewrites** `data_path` in
+`configs/env/trading_mono.yaml` after each successful PKL write (including
+custom `--output-pkl` names).
 
 If no data file is found, `train.py` falls back to synthetic data so you can
 smoke-test the full stack without uploading anything.
@@ -151,15 +159,15 @@ print('Bucket:', cs.bucket_name)
 source /workspace/eigen3/.venv/bin/activate
 cd /workspace/eigen3
 
-# Default run (mono data, synthetic fallback):
+# Default run loads Eigen3_Processed_OUTPUT.pkl from the repo root (see trading_mono.yaml).
+# If the file is missing, training uses synthetic data.
 python scripts/train.py
 
-# Point to your data file:
-python scripts/train.py env.data_path=/workspace/eigen3/Eigen3_Processed_OUTPUT.pkl
+# Optional: different file without editing the YAML
+python scripts/train.py env.data_path=/path/to/other.pkl
 
-# Override population sizing:
+# Override population sizing (data path unchanged):
 python scripts/train.py \
-    env.data_path=/workspace/eigen3/Eigen3_Processed_OUTPUT.pkl \
     population.pop_size=48 \
     population.hof_capacity=10 \
     seed=123
@@ -181,11 +189,14 @@ python scripts/train.py \
 After training produces checkpoints:
 
 ```bash
+cd /workspace/eigen3
+# Defaults: --data_path Eigen3_Processed_OUTPUT.pkl (repo root)
 python scripts/evaluate.py \
-    --checkpoint checkpoints/best_model.pkl \
-    --data /workspace/eigen3/Eigen3_Processed_OUTPUT.pkl \
-    --episodes 10
+    --checkpoint_path checkpoints/best_model.pkl \
+    --num_episodes 10
 ```
+
+Use `--data_path /path/to/file.pkl` only if your table is not the default name or location.
 
 ---
 
@@ -215,7 +226,7 @@ Use `tmux` or `screen` so training survives SSH disconnects:
 tmux new -s eigen3
 source /workspace/eigen3/.venv/bin/activate
 cd /workspace/eigen3
-python scripts/train.py env.data_path=Eigen3_Processed_OUTPUT.pkl
+python scripts/train.py
 # Ctrl-b d  to detach
 # tmux attach -t eigen3  to reconnect
 ```
@@ -246,6 +257,7 @@ eigen3/
 ├── scripts/
 │   ├── train.py                 # Hydra training entry point
 │   └── evaluate.py              # Holdout evaluation
+├── process_eigen_data.py        # CSV → indicators; updates env `data_path` in trading_mono.yaml
 ├── requirements-data.txt        # numpy + pandas only (data prep)
 ├── requirements-train.txt       # full training stack
 ├── requirements-dev.txt         # training + test/lint tooling
