@@ -766,7 +766,9 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
                         agent=agent,
                         params=best_params,
                         seed=int(cfg.seed) + gen + 1000,
-                        num_episodes=min(3, int(OmegaConf.select(cfg, "population.eval_episodes", 5))),
+                        num_episodes=min(
+                            3, int(OmegaConf.select(cfg, "population.eval_episodes", default=5))
+                        ),
                     )
                     eval_payload["run_name"] = run_name
                     eval_payload["generation"] = int(metrics.get("generation", gen + 1))
