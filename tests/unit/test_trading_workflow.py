@@ -332,7 +332,6 @@ class TestGenerationExecution:
         assert int(workflow._replay_buffer.size) > 0
         assert int(workflow._replay_buffer.size) <= workflow.config.replay_buffer_size
 
-
 class TestBestAgentRetrieval:
     """Test retrieving the best agent"""
 

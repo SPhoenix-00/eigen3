@@ -27,6 +27,7 @@ def test_build_trading_workflow_config_elite_and_population():
     wfc = build_trading_workflow_config(cfg)
     assert wfc.population_size == 10
     assert wfc.elite_size == 4  # round(10 * 0.4)
+    assert wfc.gradient_vmap_chunk_size == 8  # single-GPU default local_training_agent_batch_size
     assert wfc.crossover_rate == 0.6
     assert wfc.target_update_period == 4
     assert wfc.steps_per_agent == 50
@@ -55,6 +56,7 @@ def test_tournament_size_clamped_to_population():
     wfc = build_trading_workflow_config(cfg)
     assert wfc.population_size == 2
     assert wfc.tournament_size == 2
+    assert wfc.gradient_vmap_chunk_size == 8
 
 
 def test_single_gpu_uses_local_batch_and_replay():
@@ -83,6 +85,35 @@ def test_single_gpu_uses_local_batch_and_replay():
     wfc = build_trading_workflow_config(cfg)
     assert wfc.batch_size == 32
     assert wfc.replay_buffer_size == 5000
+    assert wfc.gradient_vmap_chunk_size == 8
+
+
+def test_single_gpu_zero_local_training_agent_batch_disables_chunking():
+    cfg = OmegaConf.create(
+        {
+            "enable_pmap": False,
+            "num_devices": 1,
+            "population": {
+                "pop_size": 8,
+                "elite_frac": 0.25,
+                "tournament_size": 2,
+                "mutation_rate": 0.1,
+                "mutation_std": 0.02,
+                "genetic_crossover_rate": 0.5,
+                "gradient_steps_per_gen": 2,
+                "batch_size": 160,
+                "local_batch_size": 32,
+                "replay_buffer_size": 1_000_000,
+                "local_replay_buffer_size": 5000,
+                "eval_episodes": 1,
+                "steps_per_agent": 10,
+                "local_training_agent_batch_size": 0,
+            },
+            "agent": {"actor_update_interval": 2},
+        }
+    )
+    wfc = build_trading_workflow_config(cfg)
+    assert wfc.gradient_vmap_chunk_size is None
 
 
 def test_multi_device_uses_global_batch_and_replay():
@@ -111,3 +142,4 @@ def test_multi_device_uses_global_batch_and_replay():
     wfc = build_trading_workflow_config(cfg)
     assert wfc.batch_size == 160
     assert wfc.replay_buffer_size == 900_000
+    assert wfc.gradient_vmap_chunk_size is None

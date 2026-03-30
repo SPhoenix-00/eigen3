@@ -317,6 +317,17 @@ def _effective_workflow_batch_size(cfg: DictConfig) -> int:
     return int(local) if local is not None else default
 
 
+def _effective_gradient_vmap_chunk_size(cfg: DictConfig) -> Optional[int]:
+    """Cap loss ``vmap`` width on single-GPU (``local_training_agent_batch_size``)."""
+    if not _single_gpu_workflow_mode(cfg):
+        return None
+    c = OmegaConf.select(cfg, "population.local_training_agent_batch_size", default=8)
+    if c is None:
+        return None
+    ci = int(c)
+    return ci if ci > 0 else None
+
+
 def _effective_replay_buffer_size(cfg: DictConfig) -> int:
     """Replay capacity: ``local_replay_buffer_size`` on single-GPU, else full size."""
     default = int(OmegaConf.select(cfg, "population.replay_buffer_size", default=1_500_000))
@@ -371,6 +382,7 @@ def run_config_summary(cfg: DictConfig) -> str:
             f"grad_steps/gen: {S('population.gradient_steps_per_gen', '?')!s}   "
             f"eval_episodes: {S('population.eval_episodes', '?')!s}",
             f"  steps_per_agent/gen: {S('population.steps_per_agent', '?')!s}",
+            f"  loss_vmap_chunk: {_effective_gradient_vmap_chunk_size(cfg) or 'full'}",
             f"  gauntlet: {S('population.gauntlet_enabled', '?')!s}",
             "-------- Logging -----",
             f"  console: {S('logging.console_log_level', 'INFO')!s}   "
@@ -458,6 +470,7 @@ def build_trading_workflow_config(cfg: DictConfig) -> TradingWorkflowConfig:
         eval_episodes=int(OmegaConf.select(cfg, "population.eval_episodes", default=5)),
         target_update_period=target_update_period,
         steps_per_agent=steps_per_agent,
+        gradient_vmap_chunk_size=_effective_gradient_vmap_chunk_size(cfg),
     )
 
 

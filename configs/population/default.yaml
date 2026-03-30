@@ -62,7 +62,7 @@ gradient_steps_per_gen: 16            # Eigen2 GRADIENT_STEPS_PER_GENERATION
 gradient_steps_per_gen_stabilization: 10  # Eigen2 GRADIENT_STEPS_PER_GENERATION_STABILIZATION
 local_gradient_steps_per_gen: 32      # Eigen2 LOCAL_GRADIENT_STEPS_PER_GENERATION
 local_gradient_steps_per_gen_stabilization: 16  # Eigen2 LOCAL_GRADIENT_STEPS_PER_GENERATION_STABILIZATION
-local_training_agent_batch_size: 8    # Eigen2 LOCAL_TRAINING_AGENT_BATCH_SIZE (GPU batch of agents)
+local_training_agent_batch_size: 8    # Single-GPU: agents per loss vmap chunk (VRAM); use >= pop_size for full vmap
 
 
 # ---------- Evaluation ----------

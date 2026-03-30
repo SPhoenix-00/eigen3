@@ -12,7 +12,7 @@ Key changes from the sequential version:
 - Genetic operators work directly on stacked arrays
 """
 
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import logging
 
@@ -117,6 +117,36 @@ def unstack_params(stacked: TradingNetworkParams, pop_size: int) -> List[Trading
     return [jax.tree.map(lambda x: x[i], stacked) for i in range(pop_size)]
 
 
+def run_chunked_vmap_loss(
+    vmap_loss: Callable[..., Dict[str, chex.Array]],
+    stacked_params: TradingNetworkParams,
+    batch: SampleBatch,
+    loss_keys: chex.Array,
+    pop_size: int,
+    chunk: Optional[int],
+) -> Dict[str, chex.Array]:
+    """Run ``vmap_loss(stacked, batch, keys)`` or slice the population axis per ``chunk``."""
+    if chunk is None or chunk <= 0 or chunk >= pop_size:
+        return vmap_loss(stacked_params, batch, loss_keys)
+
+    parts_a: List[chex.Array] = []
+    parts_c: List[chex.Array] = []
+    parts_q: List[chex.Array] = []
+    for start in range(0, pop_size, chunk):
+        end = min(start + chunk, pop_size)
+        sub_p = jax.tree.map(lambda x: x[start:end], stacked_params)
+        sub_k = loss_keys[start:end]
+        L = vmap_loss(sub_p, batch, sub_k)
+        parts_a.append(L["actor_loss"])
+        parts_c.append(L["critic_loss"])
+        parts_q.append(L["mean_q"])
+    return {
+        "actor_loss": jnp.concatenate(parts_a, axis=0),
+        "critic_loss": jnp.concatenate(parts_c, axis=0),
+        "mean_q": jnp.concatenate(parts_q, axis=0),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -139,6 +169,9 @@ class TradingWorkflowConfig:
         eval_episodes: Number of episodes to evaluate each agent
         target_update_period: How often to update target networks (in gradient steps)
         steps_per_agent: Environment steps collected per agent per generation
+        gradient_vmap_chunk_size: If set and ``< population_size``, run loss ``vmap`` in
+            consecutive slices of this many agents to cap XLA peak memory (single-GPU).
+            ``None`` means one ``vmap`` over the full population.
     """
 
     population_size: int = 10
@@ -154,6 +187,7 @@ class TradingWorkflowConfig:
     eval_episodes: int = 5
     target_update_period: int = 10
     steps_per_agent: int = 100
+    gradient_vmap_chunk_size: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +278,22 @@ class TradingERLWorkflow:
         self._vmap_eval_step = jax.jit(jax.vmap(lambda s, a: eval_env.step(s, a)))
         self._vmap_eval_reset = jax.jit(jax.vmap(eval_env.reset))
 
+    def _vmap_loss_all_agents(
+        self,
+        stacked_params: TradingNetworkParams,
+        batch: SampleBatch,
+        loss_keys: chex.Array,
+    ) -> Dict[str, chex.Array]:
+        """Loss per agent; optionally split the population axis to limit peak VRAM."""
+        return run_chunked_vmap_loss(
+            self._vmap_loss,
+            stacked_params,
+            batch,
+            loss_keys,
+            self._pop_size,
+            self.config.gradient_vmap_chunk_size,
+        )
+
     # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
@@ -272,13 +322,15 @@ class TradingERLWorkflow:
         reset_keys = random.split(reset_key, pop_size)
         self._env_states = self._vmap_env_reset(reset_keys)
 
+        chunk = self.config.gradient_vmap_chunk_size
         logger.info(
             "Population initialized: %d agents, buffer capacity %d, "
-            "obs %s, action %s",
+            "obs %s, action %s%s",
             pop_size,
             self.config.replay_buffer_size,
             obs_shape,
             action_shape,
+            f", loss_vmap_chunk={chunk}" if chunk else "",
         )
 
     # ------------------------------------------------------------------
@@ -353,11 +405,11 @@ class TradingERLWorkflow:
         buf: ReplayBufferState,
         key: chex.PRNGKey,
     ) -> Tuple[TradingNetworkParams, Dict[str, float]]:
-        """Compute DDPG losses for all agents in parallel.
+        """Compute DDPG losses for all agents (shared replay batch).
 
-        The loss computation (5 forward passes per agent) is vmapped across
-        the full population, saturating GPU compute.  All agents share the
-        same sampled replay batch — only their params differ.
+        By default losses are vmapped across the full population.  When
+        ``gradient_vmap_chunk_size`` is set and smaller than ``pop_size``,
+        the population axis is processed in chunks to cap XLA peak memory.
         """
         pop_size = self._pop_size
         tau = self.agent.tau
@@ -373,7 +425,7 @@ class TradingERLWorkflow:
             batch = buffer_sample(buf, sample_key, self.config.batch_size)
             loss_keys = random.split(loss_key, pop_size)
 
-            all_losses = self._vmap_loss(stacked_params, batch, loss_keys)
+            all_losses = self._vmap_loss_all_agents(stacked_params, batch, loss_keys)
 
             total_actor_loss += jnp.mean(all_losses["actor_loss"])
             total_critic_loss += jnp.mean(all_losses["critic_loss"])
