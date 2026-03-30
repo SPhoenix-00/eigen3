@@ -309,6 +309,11 @@ def _print_generation_summary(
     )
     print(f"  Positive: {positive}/{int(metrics.get('population_size', 0) or 0)} agents")
     print(
+        f"  Coeff: mean_max={metrics.get('mean_max_coeff', 0.0):.3f}  "
+        f"best_max={metrics.get('max_max_coeff', 0.0):.3f}  "
+        f"(threshold=1.0)"
+    )
+    print(
         f"  Train: collect/agent={metrics.get('collect_reward_mean_per_agent', 0.0):.2f}  "
         f"actor={metrics.get('mean_actor_loss', float('nan')):.4f}  "
         f"critic={metrics.get('mean_critic_loss', float('nan')):.4f}  "

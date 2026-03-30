@@ -521,6 +521,7 @@ class TradingERLWorkflow:
         all_ep_days_with_pos: list[chex.Array] = []
         all_ep_days_without_pos: list[chex.Array] = []
         all_ep_steps: list[chex.Array] = []
+        all_ep_max_coeff: list[chex.Array] = []
 
         vmap_excess = None
         if hasattr(self.eval_env, "episode_buyhold_excess_usd"):
@@ -543,6 +544,7 @@ class TradingERLWorkflow:
             ep_days_with_pos = jnp.zeros(pop_size, dtype=jnp.int32)
             ep_days_without_pos = jnp.zeros(pop_size, dtype=jnp.int32)
             ep_steps = jnp.zeros(pop_size, dtype=jnp.int32)
+            ep_max_coeff = jnp.zeros(pop_size)
 
             for _ in range(max_steps):
                 key, step_key = random.split(key)
@@ -552,6 +554,13 @@ class TradingERLWorkflow:
                     stacked_params, env_states.obs, action_keys,
                 )
                 next_states = self._vmap_eval_step(env_states, all_actions)
+
+                step_coeff = jnp.max(all_actions[:, :, 0], axis=-1)
+                ep_max_coeff = jnp.where(
+                    ~done_mask,
+                    jnp.maximum(ep_max_coeff, step_coeff),
+                    ep_max_coeff,
+                )
 
                 ep_rewards = ep_rewards + jnp.where(
                     done_mask, 0.0, next_states.reward,
@@ -588,6 +597,7 @@ class TradingERLWorkflow:
             all_ep_days_with_pos.append(ep_days_with_pos)
             all_ep_days_without_pos.append(ep_days_without_pos)
             all_ep_steps.append(ep_steps)
+            all_ep_max_coeff.append(ep_max_coeff)
 
         rewards_matrix = jnp.stack(all_ep_rewards, axis=0)  # [n_episodes, pop_size]
         excess_matrix = jnp.stack(all_ep_excess, axis=0)
@@ -597,7 +607,13 @@ class TradingERLWorkflow:
         k = max(1, min(int(self.config.conservative_k), n_episodes))
         sorted_rewards = jnp.sort(rewards_matrix, axis=0)  # ascending per agent
         bottom_k = sorted_rewards[:k, :]  # lowest k episodes per agent
-        fitness = jnp.mean(bottom_k, axis=0)
+        raw_fitness = jnp.mean(bottom_k, axis=0)
+        coeff_matrix = jnp.stack(all_ep_max_coeff, axis=0)
+        mean_max_coeff = jnp.mean(coeff_matrix, axis=0)  # [pop_size]
+        # Epsilon-scaled coefficient bonus: gives non-trading agents (fitness~0)
+        # a gradient toward the trading threshold without distorting agents that
+        # are already trading (whose fitness >> this term).
+        fitness = raw_fitness + mean_max_coeff * 1e-2
         mean_excess = jnp.mean(excess_matrix, axis=0)
         mean_gain = jnp.mean(gain_matrix, axis=0)
         reward_mean = jnp.mean(rewards_matrix, axis=0)
@@ -614,6 +630,7 @@ class TradingERLWorkflow:
             "days_with_pos": jnp.stack(all_ep_days_with_pos, axis=0),
             "days_without_pos": jnp.stack(all_ep_days_without_pos, axis=0),
             "steps": jnp.stack(all_ep_steps, axis=0),
+            "max_coeff": coeff_matrix,
         }
         return fitness, mean_excess, mean_gain, reward_mean, reward_min, per_episode
 
@@ -855,6 +872,8 @@ class TradingERLWorkflow:
             "collect_reward_mean_per_agent": float(collect_reward) / float(self._pop_size),
             "population_size": int(self._pop_size),
             "positive_agents": int(np.sum(fit_np > 0.0)),
+            "mean_max_coeff": float(np.mean(per_ep_np["max_coeff"])),
+            "max_max_coeff": float(np.max(per_ep_np["max_coeff"])),
             "top5_indices": top5_indices,
             "top5_fitness": top5_fitness,
             "top5_val_reward_mean": [float(rew_mean_np[i]) for i in top5_indices],
