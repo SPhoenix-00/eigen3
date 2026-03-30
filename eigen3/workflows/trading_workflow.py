@@ -8,6 +8,7 @@ Key changes from the sequential version:
 - Population stored as a single stacked pytree with shape [pop_size, ...]
 - Neural-network forward passes vmapped across the population
 - Environment stepping vmapped across the population
+- Experience collection: one ``jax.jit(jax.lax.fori_loop(...))`` over time (vmap × steps), not one Python dispatch per step
 - JAX ring-buffer replay instead of Python list-of-dicts
 - Genetic operators work directly on stacked arrays
 """
@@ -280,6 +281,62 @@ class TradingERLWorkflow:
         self._vmap_eval_step = jax.jit(jax.vmap(lambda s, a: eval_env.step(s, a)))
         self._vmap_eval_reset = jax.jit(jax.vmap(eval_env.reset))
 
+        pop_size_int = int(self._pop_size)
+
+        def _collect_experience_jitted(
+            stacked_params: TradingNetworkParams,
+            env_states,
+            buf: ReplayBufferState,
+            key: chex.PRNGKey,
+            num_steps: chex.Array,
+        ):
+            """Single compiled rollout: vmap over agents × ``fori_loop`` over time steps.
+
+            ``num_steps`` is a 0-D int32 array (not a Python static) so XLA keeps a real loop
+            instead of fully unrolling ``steps_per_agent`` copies of the env graph at compile time.
+            """
+
+            def step_body(_i, carry):
+                env_states, buf, key, total_reward = carry
+                key, step_key, reset_key = random.split(key, 3)
+                action_keys = random.split(step_key, pop_size_int)
+                all_actions = jax.vmap(_compute_action_one)(
+                    stacked_params, env_states.obs, action_keys,
+                )
+                next_states = jax.vmap(lambda s, a: env.step(s, a))(
+                    env_states, all_actions,
+                )
+                buf = buffer_insert_batch(
+                    buf,
+                    obs=env_states.obs,
+                    actions=all_actions,
+                    rewards=next_states.reward,
+                    next_obs=next_states.obs,
+                    dones=next_states.done.astype(jnp.float32),
+                )
+                total_reward = total_reward + jnp.sum(next_states.reward)
+                done = next_states.done
+                reset_keys = random.split(reset_key, pop_size_int)
+                fresh = jax.vmap(lambda k: env.reset(k))(reset_keys)
+                env_states = jax.tree.map(
+                    lambda f, n: jnp.where(
+                        done.reshape(-1, *([1] * (f.ndim - 1))), f, n,
+                    ),
+                    fresh,
+                    next_states,
+                )
+                return (env_states, buf, key, total_reward)
+
+            init_carry = (
+                env_states,
+                buf,
+                key,
+                jnp.array(0.0, dtype=jnp.float32),
+            )
+            return jax.lax.fori_loop(jnp.int32(0), num_steps, step_body, init_carry)
+
+        self._jit_collect_experience = jax.jit(_collect_experience_jitted)
+
     def _vmap_loss_all_agents(
         self,
         stacked_params: TradingNetworkParams,
@@ -349,52 +406,16 @@ class TradingERLWorkflow:
     ) -> Tuple[Any, ReplayBufferState, chex.PRNGKey, chex.Array]:
         """Collect ``num_steps`` transitions for ALL agents in parallel.
 
-        At each step:
-        1. ``vmap(compute_actions)`` across the population
-        2. ``vmap(env.step)`` across the population
-        3. Insert ``pop_size`` transitions into the ring buffer
-        4. Conditionally reset any environments whose episode ended
+        Implemented as one ``jax.jit`` over ``lax.fori_loop`` (vmap × time) so the
+        rollout is a single XLA program instead of ``num_steps`` Python dispatches.
         """
-        pop_size = self._pop_size
-        total_reward = jnp.array(0.0)
-
-        for _ in range(num_steps):
-            key, step_key, reset_key = random.split(key, 3)
-            action_keys = random.split(step_key, pop_size)
-
-            # All agents compute actions in a single GPU kernel
-            all_actions = self._vmap_compute_actions(
-                stacked_params, env_states.obs, action_keys,
-            )
-
-            # All environments step in a single GPU kernel
-            next_states = self._vmap_env_step(env_states, all_actions)
-
-            # Ring-buffer insert (pop_size transitions)
-            buf = buffer_insert_batch(
-                buf,
-                obs=env_states.obs,
-                actions=all_actions,
-                rewards=next_states.reward,
-                next_obs=next_states.obs,
-                dones=next_states.done.astype(jnp.float32),
-            )
-
-            total_reward = total_reward + jnp.sum(next_states.reward)
-
-            # Where done → fresh reset; else → continue
-            done = next_states.done
-            reset_keys = random.split(reset_key, pop_size)
-            fresh = self._vmap_env_reset(reset_keys)
-
-            env_states = jax.tree.map(
-                lambda f, n: jnp.where(
-                    done.reshape(-1, *([1] * (f.ndim - 1))), f, n,
-                ),
-                fresh,
-                next_states,
-            )
-
+        env_states, buf, key, total_reward = self._jit_collect_experience(
+            stacked_params,
+            env_states,
+            buf,
+            key,
+            jnp.asarray(int(num_steps), dtype=jnp.int32),
+        )
         return env_states, buf, key, total_reward
 
     # ------------------------------------------------------------------
