@@ -335,7 +335,9 @@ def _print_generation_summary(
         print(
             f"  Size: {metrics.get('hof_size', 0)}  |  "
             f"Best: {metrics.get('hof_best', 0.0):.2f}  "
-            f"Worst: {metrics.get('hof_worst', 0.0):.2f}"
+            f"({metrics.get('hof_best_bh_excess', 0.0):+.2f} vs equal-weight b&h)  |  "
+            f"Worst: {metrics.get('hof_worst', 0.0):.2f}  "
+            f"({metrics.get('hof_worst_bh_excess', 0.0):+.2f} vs equal-weight b&h)"
         )
         print(f"  Median ROI: {metrics.get('hof_median_roi', 0.0):.2f}%")
     print("\n  LOOP PERFORMANCE")

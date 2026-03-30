@@ -49,6 +49,8 @@ class TradingEnvState(PyTreeData):
     # Episode-level value-add tracking
     peak_capital_employed: chex.Array  # scalar float – max sum of entry prices across steps
     total_pnl: chex.Array  # scalar float – cumulative raw dollar PnL (exit − entry)
+    # One-shot terminal term: agent vs equal-weight buy-hold (scaled $), same as episode bonus in reward
+    episode_benchmark_excess: chex.Array  # scalar float; 0 until the terminal step
 
     # RNG for observation noise (Eigen2: multiplicative noise when is_training)
     rng_key: chex.Array = pytree_field(default_factory=lambda: jnp.zeros((2,), dtype=jnp.uint32))
@@ -309,6 +311,7 @@ class TradingEnv(Env):
             days_without_positions=jnp.array(0, dtype=jnp.int32),
             peak_capital_employed=jnp.array(0.0, dtype=jnp.float32),
             total_pnl=jnp.array(0.0, dtype=jnp.float32),
+            episode_benchmark_excess=jnp.array(0.0, dtype=jnp.float32),
             rng_key=rng_key,
         )
 
@@ -392,6 +395,8 @@ class TradingEnv(Env):
         # 6. Episode-level bonus/penalty (agent PnL vs buy-and-hold benchmark)
         episode_bonus = self._compute_episode_bonus(env_state, new_total_pnl, new_peak)
         step_reward = step_reward + jnp.where(done, episode_bonus, 0.0)
+        # Persist for metrics / HoF: same episode-wide scalar folded into reward on ``done``
+        new_benchmark_excess = jnp.where(done, episode_bonus, jnp.zeros_like(episode_bonus))
 
         # Split RNG for next step observation noise
         step_key, next_key = jax.random.split(env_state.rng_key)
@@ -410,6 +415,7 @@ class TradingEnv(Env):
             days_without_positions=days_without,
             peak_capital_employed=new_peak,
             total_pnl=new_total_pnl,
+            episode_benchmark_excess=new_benchmark_excess,
             rng_key=next_key,
         )
 
@@ -527,6 +533,15 @@ class TradingEnv(Env):
 
         benchmark_pnl = peak_capital * avg_return
         return (total_pnl - benchmark_pnl) * self.episode_reward_multiplier
+
+    def episode_buyhold_excess_usd(self, state: EnvState) -> jnp.ndarray:
+        """Episode-wide buy-hold excess (scaled $): the terminal bonus term from :meth:`step`.
+
+        This is not per-trade; it is computed once when the episode ends and added to
+        ``reward`` on that step. Stored on :class:`TradingEnvState` so readers use the
+        exact value from the reward decomposition.
+        """
+        return state.env_state.episode_benchmark_excess
 
     def _update_positions(
         self,

@@ -54,6 +54,8 @@ class HallOfFameEntry:
     total_trades: int = 0
     val_fitness: float = 0.0
     base_combined_fitness: float = 0.0
+    # Mean eval episode bonus vs equal-weight buy-and-hold (scaled $, same as env)
+    benchmark_excess_usd: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -71,6 +73,7 @@ class HallOfFameEntry:
             total_trades=data.get("total_trades", 0),
             val_fitness=data.get("val_fitness", 0.0),
             base_combined_fitness=data.get("base_combined_fitness", 0.0),
+            benchmark_excess_usd=data.get("benchmark_excess_usd", 0.0),
         )
 
 
@@ -197,9 +200,13 @@ class HallOfFame:
                 "oldest_generation": 0,
                 "newest_generation": 0,
                 "median_roi": 0.0,
+                "best_bh_excess": 0.0,
+                "worst_bh_excess": 0.0,
             }
         scores = [e.validation_score for e in self.entries]
         gens = [e.generation for e in self.entries]
+        best_e = max(self.entries, key=lambda e: e.validation_score)
+        worst_e = min(self.entries, key=lambda e: e.validation_score)
         return {
             "size": len(self.entries),
             "best_score": float(max(scores)),
@@ -209,6 +216,8 @@ class HallOfFame:
             "oldest_generation": min(gens),
             "newest_generation": max(gens),
             "median_roi": self.get_median_roi(),
+            "best_bh_excess": float(best_e.benchmark_excess_usd),
+            "worst_bh_excess": float(worst_e.benchmark_excess_usd),
         }
 
     # ------------------------------------------------------------------
@@ -237,6 +246,7 @@ class HallOfFame:
         total_trades: int = 0,
         val_fitness: float = 0.0,
         base_combined_fitness: float = 0.0,
+        benchmark_excess_usd: float = 0.0,
     ) -> bool:
         """Attempt to add *params* (Flax pytree) to the HoF.
 
@@ -263,6 +273,7 @@ class HallOfFame:
             total_trades=total_trades,
             val_fitness=val_fitness,
             base_combined_fitness=base_combined_fitness,
+            benchmark_excess_usd=benchmark_excess_usd,
         )
         self.entries.append(entry)
 
@@ -277,7 +288,9 @@ class HallOfFame:
 
     def update_from_generation(
         self,
-        candidates: List[Tuple[Any, float, int, float, float, float, int, int, float, float]],
+        candidates: List[
+            Tuple[Any, float, int, float, float, float, int, int, float, float, float]
+        ],
         generation: int,
     ) -> List[Tuple[int, float, str]]:
         """Two-phase admission: fill then cascading swap.
@@ -285,7 +298,7 @@ class HallOfFame:
         Each candidate tuple:
             (params, combined_score, agent_idx, roi, expectancy,
              train_fitness, quality_count, total_trades, val_fitness,
-             base_combined_fitness)
+             base_combined_fitness, benchmark_excess_usd)
 
         Returns list of ``(agent_idx, score, action_str)``.
         """
@@ -297,7 +310,7 @@ class HallOfFame:
 
         # Phase 1: fill empty slots with positive-score candidates
         if not self.is_full():
-            for params, score, idx, roi, exp, tf, qc, tt, vf, bcf in sorted_cands:
+            for params, score, idx, roi, exp, tf, qc, tt, vf, bcf, bh_excess in sorted_cands:
                 if self.is_full():
                     break
                 if score > 0:
@@ -313,6 +326,7 @@ class HallOfFame:
                         total_trades=tt,
                         val_fitness=vf,
                         base_combined_fitness=bcf,
+                        benchmark_excess_usd=bh_excess,
                     )
                     self.entries.append(entry)
                     if self.hof_dir:
@@ -326,7 +340,7 @@ class HallOfFame:
         remaining = [c for c in sorted_cands if c[2] not in admitted_ids]
 
         if remaining and self.is_full():
-            for params, score, idx, roi, exp, tf, qc, tt, vf, bcf in remaining:
+            for params, score, idx, roi, exp, tf, qc, tt, vf, bcf, bh_excess in remaining:
                 current_worst = min(self.entries, key=lambda e: e.validation_score)
                 if score > current_worst.validation_score:
                     old_id = current_worst.agent_id
@@ -346,6 +360,7 @@ class HallOfFame:
                         total_trades=tt,
                         val_fitness=vf,
                         base_combined_fitness=bcf,
+                        benchmark_excess_usd=bh_excess,
                     )
                     self.entries.append(entry)
                     if self.hof_dir:

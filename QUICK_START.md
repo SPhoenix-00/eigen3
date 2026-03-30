@@ -111,3 +111,13 @@ python scripts/evaluate.py \
 - `403 ... storage.buckets.get denied` -> use the GCS test above (no bucket metadata call), and ensure object permissions on the bucket
 - CPU only in JAX -> reinstall `jax[cuda12]` and verify CUDA drivers
 - GPU OOM -> lower `population.pop_size` or `population.batch_size`
+
+## 9) Training metrics, validation, and Hall of Fame
+
+**Population fitness** (the “Fitness: best / mean / std” block) comes from the vmapped **evaluation** phase each generation. It is the mean of the **K worst** episode total rewards per agent (`population.conservative_k` and `population.eval_episodes`), not from the collect phase. Rollouts must run until the episode hits **`done`**; the step budget is `episode_length + 128` on the eval env so calendar episodes are not truncated (truncation often shows as all zeros and no positive agents).
+
+**Hall of Fame** entries store **validation score** (same fitness used for admission), **ROI** as mean eval **total gain %** (episode-level, not per trade), and **`benchmark_excess_usd`**: the terminal **episode-wide** term “agent vs equal-weight buy-and-hold” (same scaled dollar amount added to reward when the episode ends). The console prints best/worst scores with **(±N vs equal-weight b&h)** for that excess. Legacy `hall_of_fame.json` without the new field loads with `0.0`.
+
+**Validation summary (Top 5)** after each generation requires workflow metrics **`top5_indices`** and **`top5_fitness`**; the training loop then runs extra validation rollouts for those agents. If Top 5 is empty, the workflow is not emitting those keys.
+
+**Implementation note:** `TradingEnvState.episode_benchmark_excess` is set on the terminal step to the same value as the episode bonus in the reward, so metrics and logging do not recompute a second path.
