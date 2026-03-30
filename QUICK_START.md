@@ -1,7 +1,8 @@
 # Eigen3 — RunPod Quick-Start Guide
 
 End-to-end instructions for spinning up a GPU pod and running Eigen3 training
-with GCS-backed Hall of Fame persistence.
+(`main.py` / `scripts/train.py` → `TradingERLWorkflow`), with optional GCS-backed
+Hall of Fame persistence. **§7** is the canonical description of the new training flow.
 
 ---
 
@@ -108,17 +109,45 @@ smoke-test the full stack without uploading anything.
 
 ---
 
-## Quick reference: how to start training
+## 7. Training flow (new stack)
 
-| Command | Notes |
-|---------|--------|
-| `python main.py` | Same Hydra defaults as below; also writes `evaluation_results/training_log_<timestamp>.txt` mirroring the console. |
-| `python main.py env.data_path=foo.pkl population.pop_size=48` | Any [Hydra override](https://hydra.cc/docs/advanced/override_grammar/basic/) after the script name. |
-| `python scripts/train.py ...` | Identical behavior **without** the evaluation-results tee (unless you set `EIGEN3_TRAINING_LOG` yourself). |
+### Commands
+
+| Command | What it does |
+|---------|----------------|
+| **`python main.py`** | Recommended on the pod: runs training with the same Hydra config as `scripts/train.py`, and mirrors the **full console** to **`evaluation_results/training_log_<timestamp>.txt`**. |
+| **`python main.py env.data_path=… population.pop_size=48 …`** | Any [Hydra override](https://hydra.cc/docs/advanced/override_grammar/basic/) after the script name (same grammar as below). |
+| **`python scripts/train.py …`** | Same training run **without** the automatic tee. To mirror to a file yourself, set **`EIGEN3_TRAINING_LOG=/path/to/log.txt`** in the environment before running. |
+
+### What actually runs
+
+1. **Hydra** loads `configs/config.yaml` (defaults: `env=trading_mono`, `agent=trading_erl`, `population=default`, `logging=default`), applies CLI overrides, and creates a timestamped run under **`outputs/<date>/<time>/`** (that folder becomes the process working directory for the run).
+2. **`scripts/train.py`** calls **`eigen3.entrypoints.training.run_training(cfg)`**.
+3. That loads data, builds **train** and **validation** **`TradingEnv`** slices, the **Hall of Fame**, **`TradingAgent`**, and **`TradingERLWorkflow`**, then runs **`workflow.train(population.total_generations)`** — GPU-vectorized generations (collect experience → DDPG updates → eval fitness → selection/HoF → repeat).
+
+### What you should see
+
+- Startup banner (ASCII) with env/population summary, then split timeline logs.
+- Each generation: a line like `Generation k/N  Mean: …  Max: …  Steps: …` plus optional HoF admission logs.
+- Finish: last-generation fitness, **Hydra output dir**, and a **TensorBoard** command hint if `logging.use_tensorboard` is true in config.
+
+### Where artifacts go
+
+| Location | Contents |
+|----------|-----------|
+| **`outputs/<date>/<time>/`** | `.hydra/config.yaml`, `overrides.yaml`, Hydra logs |
+| **`evaluation_results/training_log_*.txt`** | Only when using **`main.py`** (full console copy) |
+| **`checkpoints/`** (under the Hydra run cwd) | Local HoF and checkpoint paths used by training |
+| **`checkpoints/hall_of_fame/`** | HoF cache; synced to GCS when cloud env vars are set (see §8) |
+
+### Weights & Biases and TensorBoard
+
+- **W&B is off by default** (`logging.use_wandb: false`, `wandb_mode: disabled` in **`configs/logging/default.yaml`**). You do **not** need `wandb login` for a normal run. To opt in later: `logging.use_wandb=true logging.wandb_mode=online` once the training loop writes to W&B.
+- **TensorBoard** is enabled in config (`logging.use_tensorboard: true`); the run end prints a suggested `--logdir`. Per-generation metrics are currently **console / log file**; extend the workflow if you want scalars in TensorBoard.
 
 ---
 
-## 7. Configure GCS for Hall of Fame (Optional but Recommended)
+## 8. Configure GCS for Hall of Fame (Optional but Recommended)
 
 The Hall of Fame persists the best agents to a Google Cloud Storage bucket so
 they survive across pods and runs.
@@ -162,44 +191,35 @@ print('Bucket:', cs.bucket_name)
 
 ---
 
-## 8. Run Training
+## 9. Run Training (copy-paste)
 
 ```bash
 # Activate env if not already:
 source /workspace/eigen3/.venv/bin/activate
 cd /workspace/eigen3
 
-# Default run loads Eigen3_Processed_OUTPUT.pkl from the repo root (see trading_mono.yaml).
-# If the file is missing, training uses synthetic data.
+# Default: loads Eigen3_Processed_OUTPUT.pkl from repo root (trading_mono.yaml).
+# Missing file → synthetic data. See §7 for the full pipeline.
 python main.py
 
-# Same as above without the evaluation_results/ console log file:
+# Same run, no evaluation_results/ tee:
 python scripts/train.py
 
-# Optional: different file without editing the YAML
+# Different data file:
 python main.py env.data_path=/path/to/other.pkl
 
-# Override population sizing (data path unchanged):
+# Smaller population / reproducibility:
 python main.py \
     population.pop_size=48 \
     population.hof_capacity=10 \
     seed=123
 ```
 
-### What happens on launch
-
-1. Data is loaded and split into **train / validation / holdout** timelines.
-2. Train and validation `TradingEnv` instances are created.
-3. Actor and Critic networks are initialised; **TradingERLWorkflow** runs for
-   `population.total_generations`, printing per-generation fitness to the console
-   (and to `evaluation_results/training_log_*.txt` when using `main.py`).
-4. The **Hall of Fame** connects to GCS (or falls back to local) and restores
-   any previously saved agents; it is updated each generation.
-5. Hydra writes the full resolved config under `outputs/<date>/<time>/.hydra/`.
+(Section **§7** describes `main.py` vs `scripts/train.py`, artifacts, and W&B/TensorBoard defaults.)
 
 ---
 
-## 9. Run Evaluation (Holdout)
+## 10. Run Evaluation (Holdout)
 
 After training produces checkpoints:
 
@@ -215,25 +235,27 @@ Use `--data_path /path/to/file.pkl` only if your table is not the default name o
 
 ---
 
-## 10. Monitor Training
+## 11. Monitor Training
+
+### Console and files
+
+- **Terminal**: per-generation fitness (`TradingERLWorkflow.train`) and HoF messages.
+- **`evaluation_results/training_log_*.txt`**: full copy when you started with **`main.py`**.
+- **Hydra**: `outputs/<date>/<time>/` for resolved config and Hydra’s own log output.
 
 ### TensorBoard
+
+If `logging.use_tensorboard` is true, the training footer suggests a logdir (often under **`logs/tensorboard/<run_name>`**). From the repo root:
 
 ```bash
 tensorboard --logdir logs/ --bind_all --port 6006 &
 ```
 
-Expose port 6006 in RunPod's **HTTP Service Ports** setting to access the UI
-from your browser.
-
-### Logs
-
-Hydra writes structured logs under `outputs/<date>/<time>/`. The console
-output includes per-generation fitness stats and HoF admission events.
+Expose port **6006** in RunPod’s **HTTP Service Ports** to open the UI. (Scalars from the ERL loop are not written automatically yet unless you add them.)
 
 ---
 
-## 11. Detach Long Runs
+## 12. Detach Long Runs
 
 Use `tmux` or `screen` so training survives SSH disconnects:
 
@@ -248,7 +270,7 @@ python main.py
 
 ---
 
-## File Layout Reference
+## 13. File Layout Reference
 
 ```
 eigen3/
@@ -285,7 +307,7 @@ eigen3/
 
 ---
 
-## GPU-Vectorized Workflow (H100 / high-VRAM GPUs)
+## 14. GPU-Vectorized Workflow (H100 / high-VRAM GPUs)
 
 `TradingERLWorkflow` processes **all agents in the population simultaneously**
 via `jax.vmap`, replacing sequential Python loops with batched GPU kernels.
@@ -308,14 +330,14 @@ For 80 GB GPUs, increase batch size to keep the GPU saturated:
 
 ```bash
 # H100 SXM 80 GB — start here and watch nvidia-smi:
-python scripts/train.py \
+python main.py \
     population.batch_size=512 \
     population.local_batch_size=512 \
     population.pop_size=48 \
     population.gradient_steps_per_gen=32
 
 # A100 80 GB:
-python scripts/train.py \
+python main.py \
     population.batch_size=256 \
     population.local_batch_size=256 \
     population.pop_size=48
@@ -334,7 +356,7 @@ results.
 
 ---
 
-## Troubleshooting
+## 15. Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
@@ -346,3 +368,4 @@ results.
 | OOM on GPU | Lower `population.pop_size` or `population.batch_size`; A100/H100 80 GB handles the defaults comfortably |
 | Low GPU utilisation (`nvidia-smi` <30%) | Increase `population.batch_size` (try 256, 512, 1024); mono model is small and needs large batches to saturate |
 | `orbax-checkpoint` build error | Ensure you're on Python 3.10–3.11; some 3.12 wheels may lag |
+| W&B prompts or login errors | Defaults disable W&B (`logging.use_wandb=false`). Ignore or `pip uninstall wandb` if unused; to enable later, set `logging.use_wandb=true` when metrics are logged to W&B |
