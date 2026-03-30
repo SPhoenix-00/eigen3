@@ -24,7 +24,7 @@ from eigen3.config import (
     DEFAULT_HURDLE_RATE,
     DEFAULT_LOSS_PENALTY_MULTIPLIER,
 )
-from eigen3.data import create_synthetic_data, load_trading_data
+from eigen3.data import load_trading_data
 from eigen3.data.splits import compute_train_val_holdout_split, slice_trading_timeline
 from eigen3.environment.trading_env import TradingEnv
 from eigen3.models import Actor, DoubleCritic
@@ -497,14 +497,20 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
             mono_csv_header=mono_hdr,
         )
     else:
-        num_cols = int(OmegaConf.select(cfg, "env.num_columns", default=117))
-        num_feat = int(OmegaConf.select(cfg, "env.num_features_obs", default=5))
-        logger.info("Using synthetic data (%s columns, F=%s)", num_cols, num_feat)
-        data_array, data_array_full, norm_stats, dates_ordinal = create_synthetic_data(
-            num_days=2000,
-            num_columns=num_cols,
-            num_features_obs=num_feat,
-            seed=int(cfg.seed),
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Training data not found: {path} (env.data_path={data_path!r}). "
+                "Provide an Eigen2 npy bundle directory containing data_array.npy, "
+                "or a mono table file (.pkl, .pickle, or .csv)."
+            )
+        if path.is_dir():
+            raise FileNotFoundError(
+                f"Training data directory is not a valid Eigen2 bundle (missing data_array.npy): "
+                f"{path} (env.data_path={data_path!r})."
+            )
+        raise ValueError(
+            f"Unsupported training data file type for {path} (env.data_path={data_path!r}). "
+            "Expected a mono table with extension .pkl, .pickle, or .csv."
         )
 
     logger.info("Data shapes: obs %s, full %s", data_array.shape, data_array_full.shape)
