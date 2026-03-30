@@ -879,7 +879,10 @@ class TradingERLWorkflow:
             print(f" {t_init_s:.1f}s", flush=True)
 
         # Phase 1 — collect experience (vmapped)
-        print("  > Collect...", end="", flush=True)
+        if self.generation < 5:
+            print("  > Collect (forced exploration > 1.0)...", end="", flush=True)
+        else:
+            print("  > Collect...", end="", flush=True)
         t_collect_start = time.perf_counter()
         self.key, collect_key = random.split(self.key)
         self._env_states, self._replay_buffer, _, collect_reward = (
