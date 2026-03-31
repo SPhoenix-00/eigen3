@@ -32,6 +32,7 @@ class Critic(nn.Module):
     # Feature extraction parameters (Eigen2: 117 columns)
     num_columns: int = 117
     num_features: int = 5
+    portfolio_dim: int = 0
     column_chunk_size: int = 64
 
     # Attention parameters
@@ -104,15 +105,22 @@ class Critic(nn.Module):
         """Forward pass with gradient checkpointing
 
         Args:
-            state: Input tensor [batch, context_days, num_columns, num_features]
+            state: Input tensor [batch, context_days, num_columns, num_features + portfolio_dim]
             action: Action tensor [batch, num_investable_stocks, action_dim]
             train: Whether in training mode (for dropout and BatchNorm)
 
         Returns:
             Q-values: [batch, 1]
         """
+        if self.portfolio_dim > 0:
+            state_mkt = state[..., :-self.portfolio_dim]
+            port_raw = state[:, 0, 0, -self.portfolio_dim :]
+        else:
+            state_mkt = state
+            port_raw = None
+
         # Extract features
-        features = self.feature_extractor(state, train=train)
+        features = self.feature_extractor(state_mkt, train=train)
         # [batch, num_columns, lstm_output_size]
 
         # Apply attention if enabled
@@ -122,6 +130,8 @@ class Critic(nn.Module):
 
         # Pool features across all columns
         state_features = jnp.mean(features, axis=1)  # [batch, lstm_output_size]
+        if port_raw is not None:
+            state_features = jnp.concatenate([state_features, port_raw], axis=-1)
 
         # Flatten action
         action_flat = action.reshape(action.shape[0], -1)
@@ -148,6 +158,7 @@ class DoubleCritic(nn.Module):
     # Feature extraction parameters (Eigen2: 117 columns)
     num_columns: int = 117
     num_features: int = 5
+    portfolio_dim: int = 0
     column_chunk_size: int = 64
 
     # Attention parameters
@@ -168,7 +179,7 @@ class DoubleCritic(nn.Module):
         """Forward pass through both critics
 
         Args:
-            state: Input tensor [batch, context_days, num_columns, num_features]
+            state: Input tensor [batch, context_days, num_columns, num_features + portfolio_dim]
             action: Action tensor [batch, num_investable_stocks, action_dim]
             train: Whether in training mode
 
@@ -182,6 +193,7 @@ class DoubleCritic(nn.Module):
             critic_hidden_dims=self.critic_hidden_dims,
             num_columns=self.num_columns,
             num_features=self.num_features,
+            portfolio_dim=self.portfolio_dim,
             column_chunk_size=self.column_chunk_size,
             use_attention=self.use_attention,
             attention_heads=self.attention_heads,
@@ -197,6 +209,7 @@ class DoubleCritic(nn.Module):
             critic_hidden_dims=self.critic_hidden_dims,
             num_columns=self.num_columns,
             num_features=self.num_features,
+            portfolio_dim=self.portfolio_dim,
             column_chunk_size=self.column_chunk_size,
             use_attention=self.use_attention,
             attention_heads=self.attention_heads,

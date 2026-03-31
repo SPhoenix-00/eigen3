@@ -75,11 +75,13 @@ def test_env_mono_shapes_match_config():
     )
     key = jax.random.PRNGKey(0)
     state = env.reset(key)
-    assert state.obs.shape == (151, 18, 1)
+    nf = env.num_market_features + env.portfolio_obs_dim
+    assert state.obs.shape == (151, 18, nf)
 
     actor = Actor(
         num_columns=18,
         num_features=1,
+        portfolio_dim=env.portfolio_obs_dim,
         num_investable_stocks=1,
         investable_start_col=0,
         column_chunk_size=64,
@@ -88,13 +90,14 @@ def test_env_mono_shapes_match_config():
     critic = DoubleCritic(
         num_columns=18,
         num_features=1,
+        portfolio_dim=env.portfolio_obs_dim,
         num_investable_stocks=1,
         column_chunk_size=64,
         use_remat=False,
     )
     batch = 2
     k1, k2, k3 = jax.random.split(key, 3)
-    x = jax.random.normal(k1, (batch, 151, 18, 1))
+    x = jax.random.normal(k1, (batch, 151, 18, 1 + env.portfolio_obs_dim))
     a = jax.random.normal(k2, (batch, 1, 3))
     ap = actor.init(k3, x, train=False, return_attention_weights=False)
     out, _ = actor.apply(ap, x, train=False, return_attention_weights=False)

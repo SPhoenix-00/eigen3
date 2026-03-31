@@ -52,9 +52,10 @@ def create_test_workflow(pop_size=4):
 
     env = TradingEnv(data_array, data_array_full, norm_stats)
     nc = int(data_array.shape[1])
+    pdim = env.portfolio_obs_dim
     agent = TradingAgent(
-        actor_network=Actor(num_columns=nc),
-        critic_network=DoubleCritic(num_columns=nc),
+        actor_network=Actor(num_columns=nc, portfolio_dim=pdim),
+        critic_network=DoubleCritic(num_columns=nc, portfolio_dim=pdim),
         exploration_noise=0.1,
     )
     evaluator = MagicMock()
@@ -102,9 +103,10 @@ class TestWorkflowInitialization:
 
         env = TradingEnv(data_array, data_array_full, norm_stats)
         nc = int(data_array.shape[1])
+        pdim = env.portfolio_obs_dim
         agent = TradingAgent(
-            actor_network=Actor(num_columns=nc),
-            critic_network=DoubleCritic(num_columns=nc),
+            actor_network=Actor(num_columns=nc, portfolio_dim=pdim),
+            critic_network=DoubleCritic(num_columns=nc, portfolio_dim=pdim),
         )
         evaluator = MagicMock()
 
@@ -375,9 +377,10 @@ class TestWorkflowDeterminism:
         data_array, data_array_full, norm_stats = create_test_data()
         env = TradingEnv(data_array, data_array_full, norm_stats)
         nc = int(data_array.shape[1])
+        pdim = env.portfolio_obs_dim
         agent = TradingAgent(
-            actor_network=Actor(num_columns=nc),
-            critic_network=DoubleCritic(num_columns=nc),
+            actor_network=Actor(num_columns=nc, portfolio_dim=pdim),
+            critic_network=DoubleCritic(num_columns=nc, portfolio_dim=pdim),
         )
         evaluator = MagicMock()
         config = TradingWorkflowConfig(

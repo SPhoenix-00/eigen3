@@ -38,6 +38,8 @@ class Actor(nn.Module):
     # Feature extraction parameters (Eigen2: 117 columns)
     num_columns: int = 117
     num_features: int = 5
+    # Suffix on state[..., -portfolio_dim:] (broadcast); concatenated into context MLP input.
+    portfolio_dim: int = 0
     column_chunk_size: int = 64
 
     # Attention parameters
@@ -198,7 +200,8 @@ class Actor(nn.Module):
         """Forward pass with gradient checkpointing
 
         Args:
-            state: Input tensor [batch, context_days, num_columns, num_features]
+            state: Input tensor [batch, context_days, num_columns, num_features + portfolio_dim]
+                (market stats match ``num_features``; optional portfolio tail).
             train: Whether in training mode (for dropout and BatchNorm)
             return_attention_weights: Whether to return attention weights for logging
 
@@ -208,8 +211,15 @@ class Actor(nn.Module):
         """
         batch_size = state.shape[0]
 
-        # Extract features from all columns
-        features = self.feature_extractor(state, train=train)
+        if self.portfolio_dim > 0:
+            state_mkt = state[..., :-self.portfolio_dim]
+            port_raw = state[:, 0, 0, -self.portfolio_dim :]
+        else:
+            state_mkt = state
+            port_raw = None
+
+        # Extract features from all columns (market slice only)
+        features = self.feature_extractor(state_mkt, train=train)
         # [batch, num_columns, lstm_output_size]
 
         # Apply cross-attention if enabled
@@ -233,6 +243,8 @@ class Actor(nn.Module):
 
             # Process global context through context FC (with checkpointing)
             global_context = jnp.squeeze(global_context, axis=1)  # [batch, lstm_output_size]
+            if port_raw is not None:
+                global_context = jnp.concatenate([global_context, port_raw], axis=-1)
 
             if train and self.use_remat:
                 context_processed = remat(lambda x: self._process_context(x, train))(global_context)
@@ -245,6 +257,8 @@ class Actor(nn.Module):
         else:
             # Fallback: pool all features if no attention
             context_features = jnp.mean(features, axis=1)  # [batch, lstm_output_size]
+            if port_raw is not None:
+                context_features = jnp.concatenate([context_features, port_raw], axis=-1)
 
             if train and self.use_remat:
                 context_processed = remat(lambda x: self._process_context(x, train))(context_features)

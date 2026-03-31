@@ -7,6 +7,11 @@ import jax.random as random
 from eigen3.environment.trading_env import TradingEnv, TradingEnvState, EnvState
 
 
+def _obs_num_features(env: TradingEnv) -> int:
+    """Last dimension of observations (market + optional portfolio tail)."""
+    return env.num_market_features + env.portfolio_obs_dim
+
+
 def create_test_data(num_days=1000, num_columns=669):
     """Create test data for trading environment"""
     # Create data with some realistic variation
@@ -59,7 +64,7 @@ class TestTradingEnv:
         assert isinstance(state.env_state, TradingEnvState)
 
         # Check observation shape
-        assert state.obs.shape == (151, 669, 5)
+        assert state.obs.shape == (151, 669, _obs_num_features(env))
 
         # Check initial values
         assert state.reward == 0.0
@@ -83,7 +88,7 @@ class TestTradingEnv:
         new_state = env.step(state, action)
 
         # Check output
-        assert new_state.obs.shape == (151, 669, 5)
+        assert new_state.obs.shape == (151, 669, _obs_num_features(env))
         assert isinstance(new_state.reward, jnp.ndarray)
         assert isinstance(new_state.done, jnp.ndarray)
 
@@ -171,7 +176,7 @@ class TestTradingEnv:
 
             assert state.env_state.num_active_positions == 0
             assert state.env_state.cumulative_reward == 0.0
-            assert state.obs.shape == (151, 669, 5)
+            assert state.obs.shape == (151, 669, _obs_num_features(env))
 
 
 class TestPositionManagement:
@@ -288,7 +293,7 @@ class TestJAXFeatures:
             return env.step(state, action)
 
         new_state = jitted_step(state, action)
-        assert new_state.obs.shape == (151, 669, 5)
+        assert new_state.obs.shape == (151, 669, _obs_num_features(env))
 
     def test_env_reset_is_jittable(self):
         """Test that reset function can be JIT compiled"""
@@ -301,7 +306,7 @@ class TestJAXFeatures:
 
         key = random.PRNGKey(0)
         state = jitted_reset(key)
-        assert state.obs.shape == (151, 669, 5)
+        assert state.obs.shape == (151, 669, _obs_num_features(env))
 
     def test_env_is_vmappable(self):
         """Test that environment can be vectorized"""
@@ -315,7 +320,7 @@ class TestJAXFeatures:
         # Vectorized reset
         states = jax.vmap(env.reset)(keys)
 
-        assert states.obs.shape == (batch_size, 151, 669, 5)
+        assert states.obs.shape == (batch_size, 151, 669, _obs_num_features(env))
         assert states.reward.shape == (batch_size,)
 
     def test_deterministic_with_same_key(self):
@@ -379,7 +384,7 @@ class TestObservationSpace:
         action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         for _ in range(10):
             state = env.step(state, action)
-            assert state.obs.shape == (151, 669, 5)
+            assert state.obs.shape == (151, 669, _obs_num_features(env))
 
 
 class TestRewardSystem:
