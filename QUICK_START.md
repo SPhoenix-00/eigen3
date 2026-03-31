@@ -17,6 +17,7 @@ pip install --upgrade pip
 pip install -U "jax[cuda12]"
 pip install -r requirements-train.txt
 pip install -U google-cloud-storage
+apt-get update && apt-get install -y tmux
 ```
 
 Quick GPU check:
@@ -56,6 +57,7 @@ Training **requires** a valid file at `env.data_path` (supported Eigen2 bundle o
 ```bash
 cd /workspace/eigen3
 source .venv/bin/activate
+tmux new -s training
 python main.py
 ```
 

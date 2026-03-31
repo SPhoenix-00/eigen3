@@ -506,6 +506,113 @@ def _phase_log(label: str) -> None:
     logger.info("========== %s ==========", label)
 
 
+def _ascii_best_bnh_chart_lines(
+    history: list[tuple[int, float]],
+    *,
+    height: int = 4,
+    plot_width: int = 44,
+) -> list[str]:
+    """Best-agent validation BNH excess ($): density sparkline + small connected grid chart."""
+    if not history:
+        return []
+
+    # 8-step density row (ASCII so cp1252 / piped logs still render).
+    _SPK = " .:-=+*#"
+
+    values = [v for _, v in history]
+    gen_first, gen_last = history[0][0], history[-1][0]
+    n = len(values)
+    last_v = float(values[-1])
+    if n >= 6:
+        delta_lbl = f"d5={last_v - float(values[-6]):+.2f}"
+    elif n >= 2:
+        delta_lbl = f"d1={last_v - float(values[-2]):+.2f}"
+    else:
+        delta_lbl = ""
+
+    if n > plot_width:
+        cols: list[float] = []
+        for i in range(plot_width):
+            j0 = int(i * n / plot_width)
+            j1 = max(int((i + 1) * n / plot_width), j0 + 1)
+            chunk = values[j0:j1]
+            cols.append(sum(chunk) / len(chunk))
+    else:
+        cols = list(values)
+
+    raw_min, raw_max = min(values), max(values)
+    span = raw_max - raw_min
+    pad = 0.03 * span if span > 1e-12 else 1.0
+    vmin, vmax = raw_min - pad, raw_max + pad
+    if abs(vmax - vmin) < 1e-12:
+        vmax = vmin + 1.0
+
+    w = len(cols)
+    rows_idx = []
+    for val in cols:
+        rb = int(round((val - vmin) / (vmax - vmin) * (height - 1)))
+        rows_idx.append(height - 1 - rb)
+
+    grid = [[" " for _ in range(w)] for _ in range(height)]
+
+    def _bres(x0: int, y0: int, x1: int, y1: int) -> None:
+        dx, dy = abs(x1 - x0), abs(y1 - y0)
+        sx, sy = (1 if x0 < x1 else -1), (1 if y0 < y1 else -1)
+        err, x, y = dx - dy, x0, y0
+        while True:
+            if 0 <= y < height and 0 <= x < w and grid[y][x] == " ":
+                grid[y][x] = "."
+            if x == x1 and y == y1:
+                break
+            e2 = 2 * err
+            if e2 > -dy:
+                err -= dy
+                x += sx
+            if e2 < dx:
+                err += dx
+                y += sy
+
+    for j in range(w - 1):
+        _bres(j, rows_idx[j], j + 1, rows_idx[j + 1])
+
+    if vmin < 0.0 < vmax:
+        z_row = height - 1 - int(round((0.0 - vmin) / (vmax - vmin) * (height - 1)))
+        z_row = max(0, min(height - 1, z_row))
+        for j in range(w):
+            c = grid[z_row][j]
+            if c == " ":
+                grid[z_row][j] = "-"
+            elif c == ".":
+                grid[z_row][j] = "+"
+            elif c == "*":
+                grid[z_row][j] = "#"
+
+    for j, r in enumerate(rows_idx):
+        grid[r][j] = "*"
+
+    # Block row uses same vmin/vmax as the grid for consistency.
+    block_row_parts: list[str] = []
+    for val in cols:
+        t = (val - vmin) / (vmax - vmin)
+        bi = int(max(0, min(7, round(t * 7.0))))
+        block_row_parts.append(_SPK[bi])
+    block_row = "".join(block_row_parts)
+
+    lines: list[str] = []
+    extra = f"  {delta_lbl}" if delta_lbl else ""
+    lines.append(
+        f"  Best BNH (val $ vs B&H)  gens {gen_first}-{gen_last}  n={n}  "
+        f"last={last_v:+.2f}{extra}  range=[{raw_min:+.2f},{raw_max:+.2f}]"
+    )
+    lines.append(f"  {'sparkline':>10}|{block_row}|")
+    for r in range(height):
+        y = vmax - (vmax - vmin) * (r / max(height - 1, 1))
+        row_s = "".join(grid[r])
+        lines.append(f"  {y:10.2f}|{row_s}|")
+    lines.append(f"  {' ' * 10}+{'-' * w}+  gen {gen_first} .. {gen_last}")
+    return lines
+
+
 def _print_generation_summary(
     *,
     gen: int,
@@ -517,6 +624,7 @@ def _print_generation_summary(
     avg_gen_seconds: Optional[float] = None,
     top5_evals: Optional[list] = None,
     wall_clock_s: Optional[float] = None,
+    best_bnh_history: Optional[list[tuple[int, float]]] = None,
 ) -> None:
     def _delta(curr: float, prev: Optional[float], suffix: str = "") -> str:
         if prev is None:
@@ -590,6 +698,12 @@ def _print_generation_summary(
             )
     else:
         print("  (No Top 5 stats available)")
+
+    if best_bnh_history and gen % 5 == 0:
+        print("\n  BEST AGENT BNH (over time)")
+        print("  -------------------------------------------------------")
+        for line in _ascii_best_bnh_chart_lines(best_bnh_history):
+            print(line)
 
     if "hof_size" in metrics:
         print("\n  HALL OF FAME")
@@ -1268,6 +1382,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
     last: dict[str, Any] = {}
     prev_metrics: Optional[dict[str, Any]] = None
     prev_eval: Optional[dict[str, Any]] = None
+    best_bnh_history: list[tuple[int, float]] = []
     running_gen_seconds = 0.0
     try:
         for gen in range(start_gen, num_gen):
@@ -1286,6 +1401,9 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
             all_metrics.append(metrics)
 
             top5_evals = _top5_eval_rows_from_metrics(metrics)
+            bh_usd = metrics.get("top5_bh_excess_usd") or []
+            if bh_usd:
+                best_bnh_history.append((int(metrics.get("generation", gen + 1)), float(bh_usd[0])))
             progress_eval = top5_evals[0][2] if top5_evals else {}
             best_params_for_progress = jax.tree.map(lambda x: x[metrics["top5_indices"][0]], workflow._stacked_params) if top5_evals else workflow.get_last_best_agent()
             
@@ -1305,6 +1423,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
                 ),
                 top5_evals=top5_evals,
                 wall_clock_s=t_gen_wall_s,
+                best_bnh_history=best_bnh_history,
             )
             running_gen_seconds += t_gen_wall_s
             prev_metrics = metrics
