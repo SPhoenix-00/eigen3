@@ -646,13 +646,17 @@ class TradingEnv(Env):
         results = jax.vmap(update_single_position)(positions)
         new_positions, rewards, wins, losses, gains, pnls = results
 
+        # One closed lot => exactly one win or one loss. Count trades from exits,
+        # not from reward magnitude (reward can be 0 after hurdle / zero coef).
+        closes_this_step = jnp.sum(wins) + jnp.sum(losses)
+
         return (
             new_positions,
             jnp.sum(rewards),
             env_state.num_wins + jnp.sum(wins),
             env_state.num_losses + jnp.sum(losses),
             env_state.total_gain_pct + jnp.sum(gains),
-            env_state.num_trades + jnp.sum(jnp.where(rewards != 0, 1, 0)),
+            env_state.num_trades + closes_this_step,
             jnp.sum(pnls),
         )
 

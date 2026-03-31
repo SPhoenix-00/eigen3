@@ -307,13 +307,22 @@ def _maybe_run_hof_gauntlet(
     if workflow._stacked_params is None:
         return
 
-    logger.info(
-        "HoF gauntlet (gen=%s): evaluating %d HoF agents (val + holdout)...",
-        workflow.generation,
-        len(hof),
+    # Use print (not only logger) so TeeLogger / EIGEN3_TRAINING_LOG captures output.
+    print("\n" + "=" * 60, flush=True)
+    print(
+        f"HoF GAUNTLET | workflow gen {workflow.generation} | run {run_name}",
+        flush=True,
     )
+    print("=" * 60, flush=True)
+
     template = jax.tree.map(lambda x: x[0], workflow._stacked_params)
     entries_snapshot = list(hof.entries)
+    n_hof = len(entries_snapshot)
+    print(
+        f"  Evaluating {n_hof} HoF agent(s): one shared random validation episode + holdout...",
+        flush=True,
+    )
+    t_g_start = time.perf_counter()
     loaded = [hof.load_params(e.agent_id, template) for e in entries_snapshot]
     stacked = stack_params(loaded)
 
@@ -323,6 +332,7 @@ def _maybe_run_hof_gauntlet(
         0x47314E54,  # "GANT" — gauntlet stream salt
     )
     out = workflow.gauntlet_evaluate(stacked, gauntlet_key)
+    print(f"  Gauntlet rollouts done ({time.perf_counter() - t_g_start:.1f}s).", flush=True)
 
     val_bn = out["val_bn_excess"]
     hold_bn = out["hold_bn_excess"]
@@ -354,7 +364,12 @@ def _maybe_run_hof_gauntlet(
 
     removed = hof.remove_entries_by_agent_ids(purge_ids)
     if removed:
-        logger.info("HoF gauntlet: purged %d HoF agent(s) (validation BNH <= 0).", len(removed))
+        print(
+            f"  Purged from HoF (val BNH <= 0): {len(removed)} — ids {removed}",
+            flush=True,
+        )
+    else:
+        print("  Purged from HoF: 0 (all agents positive val BNH).", flush=True)
 
     candidates.sort(key=lambda t: -t[1])
     for params_i, g, v, h, ent in candidates:
@@ -398,7 +413,53 @@ def _maybe_run_hof_gauntlet(
         "global_15_snapshot": global_fifteen.to_snapshot_dicts(),
     }
     paths = _write_gauntlet_reports(eval_dir, generation=int(workflow.generation), payload=payload)
-    logger.info("HoF gauntlet report: %s | %s", paths["json"], paths["csv"])
+
+    promoted_n = sum(1 for r in per_agent_rows if r.get("promoted_global15"))
+    attempted_g15 = len(candidates)
+    print(
+        f"  Global 15: {attempted_g15} double-pass candidate(s); "
+        f"{promoted_n} admitted or replaced (size now {len(global_fifteen)}/{global_fifteen.capacity}).",
+        flush=True,
+    )
+    print(
+        "  Per-agent (val/hold BNH excess = terminal vs equal-weight B&H, scaled $):",
+        flush=True,
+    )
+    hdr = (
+        f"  {'hof_id':>7} {'val_BNH':>12} {'hold_BNH':>12} {'gauntlet':>12} "
+        f"{'purged':>8} {'G15':>5} {'G15_action':<22}"
+    )
+    print(hdr, flush=True)
+    print("  " + "-" * 86, flush=True)
+    for r in sorted(per_agent_rows, key=lambda x: x["hof_agent_id"]):
+        purged = "yes" if r["purged_val_bn_fail"] else "no"
+        g15 = "yes" if r.get("promoted_global15") else "no"
+        act = str(r.get("global15_action") or "")[:22]
+        print(
+            f"  {r['hof_agent_id']:7d} "
+            f"{r['val_bn_excess']:12.4f} {r['hold_bn_excess']:12.4f} {r['gauntlet_score']:12.4f} "
+            f"{purged:>8} {g15:>5} {act:<22}",
+            flush=True,
+        )
+    print(f"  Val reset key (uint32): {out['val_reset_key_uint32']}", flush=True)
+    print(f"  Hold reset key (uint32): {out['hold_reset_key_uint32']}", flush=True)
+    print(f"  Split rows: val [{split.val_env_start}, {split.val_end}) | ", end="", flush=True)
+    print(
+        f"holdout env [{split.holdout_env_start}, {split.holdout_end})",
+        flush=True,
+    )
+    print(f"  Report JSON: {paths['json']}", flush=True)
+    print(f"  Report CSV:  {paths['csv']}", flush=True)
+    print("=" * 60 + "\n", flush=True)
+
+    logger.info(
+        "HoF gauntlet gen=%s: %d agents, purged=%d, G15 promoted=%d | %s",
+        workflow.generation,
+        n_hof,
+        len(removed),
+        promoted_n,
+        paths["json"],
+    )
 
 
 def _compat_mode_enabled() -> bool:
