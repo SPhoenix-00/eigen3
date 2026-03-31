@@ -902,7 +902,20 @@ def run_config_summary(cfg: DictConfig) -> str:
     return "\n".join(lines)
 
 
-def build_networks(cfg: DictConfig) -> tuple[Actor, DoubleCritic]:
+def build_networks(
+    cfg: DictConfig,
+    *,
+    portfolio_dim: int | None = None,
+) -> tuple[Actor, DoubleCritic]:
+    """Build Actor and DoubleCritic from Hydra config.
+
+    Args:
+        cfg: Hydra config.
+        portfolio_dim: Observation-tail width produced by the environment
+            (``env.portfolio_obs_dim``).  When ``None``, the value is derived
+            from config keys — prefer passing explicitly to avoid formula
+            duplication.
+    """
     def _env(k: str, default):
         return OmegaConf.select(cfg, f"env.{k}", default=default)
 
@@ -913,9 +926,10 @@ def build_networks(cfg: DictConfig) -> tuple[Actor, DoubleCritic]:
     nf = int(_env("num_features_obs", 5))
     ni = int(_env("num_investable_stocks", 108))
     istart = int(_env("investable_start_col", 9))
-    mp = int(_env("max_positions", 10))
-    include_pf = bool(_env("include_portfolio_in_obs", True))
-    portfolio_dim = (2 + 3 * mp) if include_pf else 0
+    if portfolio_dim is None:
+        mp = int(_env("max_positions", 10))
+        include_pf = bool(_env("include_portfolio_in_obs", True))
+        portfolio_dim = (2 + 3 * mp) if include_pf else 0
     chunk = int(_agent_fe("chunk_size", 64))
     use_remat_a = OmegaConf.select(cfg, "agent.actor_network.use_remat", default=True)
     use_remat_c = OmegaConf.select(cfg, "agent.critic_network.use_remat", default=True)
@@ -1250,7 +1264,7 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
     vstate = val_env.reset(vkey)
     logger.info("Validation env reset OK; obs shape: %s", vstate.obs.shape)
 
-    actor, critic = build_networks(cfg)
+    actor, critic = build_networks(cfg, portfolio_dim=env.portfolio_obs_dim)
     agent = TradingAgent(
         actor_network=actor,
         critic_network=critic,

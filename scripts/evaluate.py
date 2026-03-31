@@ -259,7 +259,7 @@ def main():
     # --- Build agent & load checkpoint ---
     nc = int(data_obs.shape[1])
     nf = int(data_obs.shape[2])
-    portfolio_dim = (2 + 3 * args.max_positions) if not args.no_portfolio_obs else 0
+    portfolio_dim = env.portfolio_obs_dim
     use_remat = not args.no_remat
     actor = Actor(
         num_columns=nc,

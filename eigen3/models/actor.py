@@ -19,6 +19,26 @@ from eigen3.models.feature_extractor import FeatureExtractor
 from eigen3.models.attention import CrossAttentionModule
 
 
+def split_market_portfolio(
+    state: chex.Array,
+    portfolio_dim: int,
+) -> Tuple[chex.Array, Optional[chex.Array]]:
+    """Separate market observations from the broadcast portfolio tail.
+
+    The portfolio vector is identical at every ``(time, column)`` cell, so we
+    read it once from ``[:, 0, 0, ...]``.
+
+    Returns:
+        ``(state_market, port_raw)`` where *port_raw* is ``None`` when
+        ``portfolio_dim == 0``.
+    """
+    if portfolio_dim > 0:
+        state_market = state[..., :-portfolio_dim]
+        port_raw = state[:, 0, 0, -portfolio_dim:]
+        return state_market, port_raw
+    return state, None
+
+
 class Actor(nn.Module):
     """Actor network: outputs [coefficient, sale_target, close_fraction] per stock.
 
@@ -72,6 +92,9 @@ class Actor(nn.Module):
             )
         else:
             self.attention = None
+
+        if self.portfolio_dim > 0:
+            self.portfolio_ln = nn.LayerNorm(name='portfolio_ln')
 
         # Investable stocks processing
         self.investable_fc1 = nn.Dense(self.actor_hidden_dims[0], name='investable_fc1')
@@ -211,12 +234,9 @@ class Actor(nn.Module):
         """
         batch_size = state.shape[0]
 
-        if self.portfolio_dim > 0:
-            state_mkt = state[..., :-self.portfolio_dim]
-            port_raw = state[:, 0, 0, -self.portfolio_dim :]
-        else:
-            state_mkt = state
-            port_raw = None
+        state_mkt, port_raw = split_market_portfolio(state, self.portfolio_dim)
+        if port_raw is not None:
+            port_raw = self.portfolio_ln(port_raw)
 
         # Extract features from all columns (market slice only)
         features = self.feature_extractor(state_mkt, train=train)
@@ -367,6 +387,15 @@ def test_actor():
     params_remat = actor_remat.init(key, state, train=False)
     actions_remat, _ = actor_remat.apply(params_remat, state, train=True)
     print(f"✓ Gradient checkpointing test passed! Actions shape: {actions_remat.shape}")
+
+    # Test with portfolio_dim > 0
+    pdim = 32
+    state_pf = random.normal(key, (batch_size, context_days, 117, 5 + pdim))
+    actor_pf = Actor(portfolio_dim=pdim, use_remat=False)
+    params_pf = actor_pf.init(key, state_pf, train=False, return_attention_weights=False)
+    actions_pf, _ = actor_pf.apply(params_pf, state_pf, train=False, return_attention_weights=False)
+    assert actions_pf.shape == (batch_size, 108, 3)
+    print(f"✓ Portfolio dim={pdim} test passed! Actions shape: {actions_pf.shape}")
 
     print("\n✓ All Actor tests passed!")
 

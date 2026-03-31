@@ -17,6 +17,7 @@ import chex
 
 from eigen3.models.feature_extractor import FeatureExtractor
 from eigen3.models.attention import SelfAttentionModule
+from eigen3.models.actor import split_market_portfolio
 
 
 class Critic(nn.Module):
@@ -65,6 +66,9 @@ class Critic(nn.Module):
         else:
             self.attention = None
 
+        if self.portfolio_dim > 0:
+            self.portfolio_ln = nn.LayerNorm(name='portfolio_ln')
+
         # Action dimension (flattened)
         self.action_flat_dim = self.num_investable_stocks * self.action_dim
 
@@ -112,12 +116,9 @@ class Critic(nn.Module):
         Returns:
             Q-values: [batch, 1]
         """
-        if self.portfolio_dim > 0:
-            state_mkt = state[..., :-self.portfolio_dim]
-            port_raw = state[:, 0, 0, -self.portfolio_dim :]
-        else:
-            state_mkt = state
-            port_raw = None
+        state_mkt, port_raw = split_market_portfolio(state, self.portfolio_dim)
+        if port_raw is not None:
+            port_raw = self.portfolio_ln(port_raw)
 
         # Extract features
         features = self.feature_extractor(state_mkt, train=train)
@@ -274,6 +275,20 @@ def test_critic():
     params_remat = critic_remat.init(key, state, action, train=False)
     q_values_remat = critic_remat.apply(params_remat, state, action, train=True)
     print(f"✓ Gradient checkpointing test passed! Q-values shape: {q_values_remat.shape}")
+
+    # Test with portfolio_dim > 0
+    print("\nTesting with portfolio_dim...")
+    pdim = 32
+    state_pf = random.normal(key, (batch_size, context_days, 117, 5 + pdim))
+    critic_pf = Critic(portfolio_dim=pdim, use_remat=False)
+    params_pf = critic_pf.init(key, state_pf, action, train=False)
+    q_pf = critic_pf.apply(params_pf, state_pf, action, train=False)
+    assert q_pf.shape == (batch_size, 1)
+    dc_pf = DoubleCritic(portfolio_dim=pdim, use_remat=False)
+    params_dc_pf = dc_pf.init(key, state_pf, action, train=False)
+    q_dc_pf = dc_pf.apply(params_dc_pf, state_pf, action, train=False)
+    assert q_dc_pf.shape == (batch_size, 2)
+    print(f"✓ Portfolio dim={pdim} test passed!")
 
     print("\n✓ All Critic tests passed!")
 

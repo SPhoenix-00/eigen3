@@ -554,7 +554,13 @@ class TradingEnv(Env):
         return jnp.concatenate([normalized, port_broadcast], axis=-1)
 
     def _portfolio_obs_vector(self, env_state: TradingEnvState) -> chex.Array:
-        """Portfolio tail [sum_coef_scaled, days_since_buy_scaled, flat slot triples]."""
+        """Portfolio tail ``[sum_coef_scaled, days_since_buy_scaled, flat slot triples]``.
+
+        Per-slot triples are ``(entry_price/1000, coef/100, cal_days_held/366)``.
+        ``cal_days_held`` is the calendar-day gap between ``current_step`` and
+        each slot's entry step (via ``dates_ordinal``), giving the model a
+        relative holding duration rather than an absolute calendar position.
+        """
         pos = env_state.positions
         active = pos[:, 5] > 0.5
         coefs = pos[:, 4]
@@ -572,11 +578,15 @@ class TradingEnv(Env):
         v1 = gap / jnp.float32(366.0)
         n = self.dates_ordinal.shape[0]
         entry_clamped = jnp.clip(entry_steps, 0, n - 1)
-        buy_ord = self.dates_ordinal[entry_clamped].astype(jnp.float32)
+        current_ord = self.dates_ordinal[
+            jnp.clip(env_state.current_step, 0, n - 1)
+        ].astype(jnp.float32)
+        entry_ord = self.dates_ordinal[entry_clamped].astype(jnp.float32)
+        days_held = current_ord - entry_ord
         slot_prices = jnp.where(active, pos[:, 2], 0.0) / jnp.float32(1000.0)
         slot_coefs = jnp.where(active, coefs, 0.0) / jnp.float32(100.0)
-        slot_dates = jnp.where(active, buy_ord / jnp.float32(730_000.0), 0.0)
-        slots = jnp.reshape(jnp.stack([slot_prices, slot_coefs, slot_dates], axis=-1), (-1,))
+        slot_days = jnp.where(active, days_held, 0.0) / jnp.float32(366.0)
+        slots = jnp.reshape(jnp.stack([slot_prices, slot_coefs, slot_days], axis=-1), (-1,))
         return jnp.concatenate([jnp.stack([v0, v1]), slots])
 
     def _calendar_gap(self, step_a: chex.Array, step_b: chex.Array) -> chex.Array:
