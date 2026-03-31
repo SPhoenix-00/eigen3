@@ -86,7 +86,7 @@ skip_reevaluation_on_resume: true     # Skip re-eval on resume unless reward fun
 # ---------- Curriculum (trading workflow) ----------
 # Forced exploration: override actor coeffs > threshold until replay buffer is this full (0–1).
 forced_exploration_buffer_pct: 0.9
-# After buffer fills, ramp BnH + loss penalty from 0 to full over this many generations.
+# After buffer fills, ramp loss penalty from 0 to full over this many generations.
 bnh_penalty_warmup_gens: 5
 
 
@@ -160,10 +160,10 @@ cloud_project_name: "eigen3"         # Prefix inside the bucket (e.g. gs://bucke
 
 # ---------- HoF gauntlet & Global 15 (shared leaderboard) ----------
 # Every N generations: re-evaluate all HoF agents on one shared random validation episode +
-# holdout; purge HoF if validation BNH <= 0; promote double-passers to Global 15 by gauntlet score.
+# holdout; purge HoF if validation alpha-sum <= 0; promote double-passers to Global 15 by gauntlet score.
 gauntlet_interval: 20                 # 0 disables
 global_15_capacity: 15                # Top-N by gauntlet score under EIGEN3_ARTIFACT_ROOT/global_15/ + gs://.../{cloud_project}/global_15/
-gauntlet_bnh_clamp: false             # Reserved — gauntlet uses raw terminal BNH excess for pass/fail
+gauntlet_bnh_clamp: false             # Reserved legacy flag (gauntlet uses raw alpha-sum pass/fail)
 
 
 # ---------- Consistency Mode ----------

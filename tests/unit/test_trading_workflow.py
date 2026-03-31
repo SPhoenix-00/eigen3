@@ -298,6 +298,11 @@ class TestGenerationExecution:
         assert metrics['generation'] == 1
         assert workflow.generation == 1
         assert workflow._stacked_params is not None
+        # Daily-alpha mode: keep legacy key for compatibility plus explicit alpha alias.
+        assert "top5_bh_excess_usd" in metrics
+        assert "top5_alpha_sum_usd" in metrics
+        # Terminal BNH reward rewrite controls were removed in daily-alpha mode.
+        assert "bnh_terminal_clamp_active" not in metrics
 
     def test_run_multiple_generations(self):
         """Test running multiple generations"""

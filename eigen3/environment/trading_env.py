@@ -49,8 +49,8 @@ class TradingEnvState(PyTreeData):
     # Episode-level value-add tracking
     peak_capital_employed: chex.Array  # scalar float – max sum of entry prices across steps
     total_pnl: chex.Array  # scalar float – cumulative raw dollar PnL (exit − entry)
-    # One-shot terminal term: agent vs equal-weight buy-hold (scaled $), same as episode bonus in reward
-    episode_benchmark_excess: chex.Array  # scalar float; 0 until the terminal step
+    # Episode-level aggregate of unscaled daily alpha (agent daily PnL - benchmark daily PnL).
+    episode_alpha_sum: chex.Array  # scalar float; cumulative across steps
 
     # Dynamic multipliers for curriculum learning
     loss_penalty_multiplier: chex.Array = pytree_field(default_factory=lambda: jnp.array(1.25, dtype=jnp.float32))
@@ -315,7 +315,7 @@ class TradingEnv(Env):
             days_without_positions=jnp.array(0, dtype=jnp.int32),
             peak_capital_employed=jnp.array(0.0, dtype=jnp.float32),
             total_pnl=jnp.array(0.0, dtype=jnp.float32),
-            episode_benchmark_excess=jnp.array(0.0, dtype=jnp.float32),
+            episode_alpha_sum=jnp.array(0.0, dtype=jnp.float32),
             loss_penalty_multiplier=jnp.array(self.loss_penalty_multiplier, dtype=jnp.float32),
             action_bonus=jnp.array(0.0, dtype=jnp.float32),
             rng_key=rng_key,
@@ -379,34 +379,60 @@ class TradingEnv(Env):
         # Count active positions after updates
         num_active = jnp.sum(positions[:, 5])  # Count is_active flags
 
-        # 4. Apply inaction penalty if no positions
-        has_positions_now = num_active > 0
-        inaction_pen = jax.lax.select(
-            ~had_positions & ~has_positions_now,
-            -self.inaction_penalty,
-            0.0
-        )
-
         # Track days with/without positions
+        has_positions_now = num_active > 0
         days_with = env_state.days_with_positions + jax.lax.select(has_positions_now, 1, 0)
         days_without = env_state.days_without_positions + jax.lax.select(~has_positions_now, 1, 0)
 
-        # Total per-step reward (trade-level)
-        step_reward = close_reward + action_reward + inaction_pen
+        # --- Calculate Daily Alpha Reward ---
+        # 1. Get prices for current step and next step (to measure the return of holding the portfolio for 1 day)
+        new_step = env_state.current_step + 1
+        safe_next_step = jnp.minimum(new_step, self.data_array_full.shape[0] - 1)
+        
+        curr_prices = jax.lax.dynamic_slice(
+            self.data_array_full[:, :, 1],
+            (env_state.current_step, self.investable_start_col),
+            (1, self.num_investable_stocks),
+        ).squeeze(0)
+        next_prices = jax.lax.dynamic_slice(
+            self.data_array_full[:, :, 1],
+            (safe_next_step, self.investable_start_col),
+            (1, self.num_investable_stocks),
+        ).squeeze(0)
+
+        # 2. Benchmark Daily PnL (1 share of every valid stock)
+        valid = jnp.isfinite(curr_prices) & jnp.isfinite(next_prices) & (curr_prices > 0)
+        benchmark_daily_pnl = jnp.sum(jnp.where(valid, next_prices - curr_prices, 0.0))
+
+        # 3. Agent Daily PnL
+        # Active positions: is_active > 0.5
+        active_mask = (positions[:, 5] > 0.5)
+        stock_indices = positions[:, 0].astype(jnp.int32)
+        coefficients = positions[:, 4]
+        scaled_coefs = jnp.power(coefficients, self.conviction_scaling_power)
+        
+        # We assume 1 nominal share per position, scaled by coefficient
+        pos_diffs = next_prices[stock_indices] - curr_prices[stock_indices]
+        agent_daily_pnl = jnp.sum(jnp.where(active_mask, scaled_coefs * pos_diffs, 0.0))
+
+        # 4. Daily Alpha Calculation
+        daily_alpha = agent_daily_pnl - benchmark_daily_pnl
+        
+        # Apply loss penalty
+        daily_alpha = jnp.where(
+            daily_alpha >= 0,
+            daily_alpha,
+            daily_alpha * env_state.loss_penalty_multiplier
+        )
+
+        step_reward = daily_alpha * self.episode_reward_multiplier
 
         # 5. Move to next step
         new_step = env_state.current_step + 1
         done = new_step >= env_state.end_step
 
-        # 6. Episode-level bonus/penalty (agent PnL vs buy-and-hold benchmark)
-        # Suppress the BNH bonus during forced exploration, scaling it up from 0 to 1 over a few generations.
-        episode_bonus = self._compute_episode_bonus(env_state, new_total_pnl, new_peak)
-        
-        # We multiply by episode_reward_multiplier which can be dynamically adjusted
-        step_reward = step_reward + jnp.where(done, episode_bonus * self.episode_reward_multiplier, 0.0)
-        
-        # Persist for metrics / HoF: same episode-wide scalar folded into reward on ``done``
-        new_benchmark_excess = jnp.where(done, episode_bonus, jnp.zeros_like(episode_bonus))
+        # Persist for metrics / HoF: accumulate daily alpha over the episode
+        new_alpha_sum = env_state.episode_alpha_sum + daily_alpha
 
         # Split RNG for next step observation noise
         step_key, next_key = jax.random.split(env_state.rng_key)
@@ -425,7 +451,7 @@ class TradingEnv(Env):
             days_without_positions=days_without,
             peak_capital_employed=new_peak,
             total_pnl=new_total_pnl,
-            episode_benchmark_excess=new_benchmark_excess,
+            episode_alpha_sum=new_alpha_sum,
             rng_key=next_key,
         )
 
@@ -488,24 +514,6 @@ class TradingEnv(Env):
         b = jnp.clip(step_b, 0, n - 1).astype(jnp.int32)
         return self.dates_ordinal[a] - self.dates_ordinal[b]
 
-    def _gain_reward_scalar(
-        self,
-        entry_price: chex.Array,
-        exit_price: chex.Array,
-        coefficient: chex.Array,
-        loss_penalty_multiplier: chex.Array,
-    ) -> chex.Array:
-        """Reward for closing one lot (hurdle + conviction scaling)."""
-        gain_pct = ((exit_price - entry_price) / entry_price) * 100.0
-        hurdle_pct = self.hurdle_rate * 100.0
-        net_gain_pct = gain_pct - hurdle_pct
-        scaled_coef = jnp.power(coefficient, self.conviction_scaling_power)
-        return jnp.where(
-            net_gain_pct >= 0,
-            scaled_coef * net_gain_pct,
-            scaled_coef * net_gain_pct * loss_penalty_multiplier,
-        )
-
     def _compute_episode_bonus(
         self,
         env_state: TradingEnvState,
@@ -551,14 +559,16 @@ class TradingEnv(Env):
         benchmark_pnl = jnp.where(peak_capital > 0, active_bnh, idle_bnh)
         return (total_pnl - benchmark_pnl)
 
-    def episode_buyhold_excess_usd(self, state: EnvState) -> jnp.ndarray:
-        """Episode-wide buy-hold excess (scaled $): the terminal bonus term from :meth:`step`.
+    def episode_alpha_sum_usd(self, state: EnvState) -> jnp.ndarray:
+        """Episode-wide sum of unscaled daily alpha in dollar units."""
+        return state.env_state.episode_alpha_sum
 
-        This is not per-trade; it is computed once when the episode ends and added to
-        ``reward`` on that step. Stored on :class:`TradingEnvState` so readers use the
-        exact value from the reward decomposition.
+    def episode_buyhold_excess_usd(self, state: EnvState) -> jnp.ndarray:
+        """Compatibility alias for older callers.
+
+        Returns the same scalar as :meth:`episode_alpha_sum_usd`.
         """
-        return state.env_state.episode_benchmark_excess
+        return self.episode_alpha_sum_usd(state)
 
     def _update_positions(
         self,
@@ -614,7 +624,7 @@ class TradingEnv(Env):
 
                 pos_reward = jax.lax.select(
                     should_exit,
-                    self._gain_reward_scalar(entry_price, exit_price, coefficient, env_state.loss_penalty_multiplier),
+                    0.0,
                     0.0,
                 )
 
@@ -698,7 +708,7 @@ class TradingEnv(Env):
             valid = jnp.isfinite(price)
             exit_price = jnp.where(valid, price, entry_price)
 
-            r = jnp.where(do, self._gain_reward_scalar(entry_price, exit_price, coefficient, env_state.loss_penalty_multiplier), 0.0)
+            r = jnp.where(do, 0.0, 0.0)
             gain_pct = jnp.where(do, ((exit_price - entry_price) / entry_price) * 100.0, 0.0)
             w_add = jnp.where(do & (gain_pct > 0), jnp.int32(1), jnp.int32(0))
             l_add = jnp.where(do & (gain_pct <= 0), jnp.int32(1), jnp.int32(0))

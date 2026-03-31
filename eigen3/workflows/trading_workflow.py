@@ -369,9 +369,6 @@ class TradingERLWorkflow:
         self.hof = hall_of_fame
 
         self._printed_train_compile_hint = False
-        # Terminal BnH in rewards: see run_generation (4/5 top-by-fitness with BnH>0 for 2 gens → unlock).
-        self._allow_negative_bnh_terminal_next_gen: bool = False
-        self._bnh_quorum_streak: int = 0  # consecutive gens meeting top-5 BnH quorum
         _maybe_enable_jax_compile_logging()
         self._build_vmapped_fns()
 
@@ -431,8 +428,6 @@ class TradingERLWorkflow:
             self._vmap_holdout_reset = None
 
         pop_size_int = int(self._pop_size)
-        collect_erp = float(getattr(env, "episode_reward_multiplier", 1.0))
-
         def _collect_experience_jitted(
             stacked_params: TradingNetworkParams,
             env_states,
@@ -440,10 +435,8 @@ class TradingERLWorkflow:
             key: chex.PRNGKey,
             num_steps: chex.Array,
             force_explore: chex.Array,
-            bnh_multiplier: chex.Array,
             loss_penalty_multiplier: chex.Array,
             action_bonus: chex.Array,
-            bnh_clamp_negative_terminal: chex.Array,
         ):
             """Single compiled rollout: vmap over agents × ``fori_loop`` over time steps.
 
@@ -467,38 +460,9 @@ class TradingERLWorkflow:
                     )
                 )
                 
-                # Apply bnh_multiplier directly inside the jitted loop so it propagates to step_reward
-                # We need to map it into step logic without redefining env.step.
-                # Actually, the environment computes bonus independently. Let's patch TradingEnvState 
-                # temporarily, or redefine env.step to take bnh_multiplier?
-                # Better: we just compute next_states, then manually scale the benchmark excess portion
-                # of the reward. 
-                
                 next_states = jax.vmap(lambda s, a: env.step(s, a))(
                     env_states, all_actions,
                 )
-                
-                # The reward from env.step includes: episode_bonus * episode_reward_multiplier.
-                # episode_benchmark_excess stores the raw bonus (before erp).
-                # We scale the BnH component by bnh_multiplier:
-                #   adjusted = reward + excess * erp * (bnh_multiplier - 1)
-                # bnh_multiplier=0 removes BnH entirely; bnh_multiplier=1 is a no-op.
-                excess = next_states.env_state.episode_benchmark_excess
-                bnh_adj = jnp.where(
-                    next_states.done,
-                    excess * collect_erp * (bnh_multiplier - 1.0),
-                    0.0,
-                )
-                next_states = next_states.replace(reward=next_states.reward + bnh_adj)
-                # Optional: terminal BnH in reward is only non-negative (scaled) unless unlocked.
-                full_bnh = excess * collect_erp * bnh_multiplier
-                clip_bnh = jnp.maximum(excess, 0.0) * collect_erp * bnh_multiplier
-                crimp = jnp.where(
-                    bnh_clamp_negative_terminal & next_states.done,
-                    clip_bnh - full_bnh,
-                    0.0,
-                )
-                next_states = next_states.replace(reward=next_states.reward + crimp)
                 buf = buffer_insert_batch(
                     buf,
                     obs=env_states.obs,
@@ -597,10 +561,8 @@ class TradingERLWorkflow:
         key: chex.PRNGKey,
         num_steps: int,
         force_explore: bool,
-        bnh_multiplier: float,
         loss_penalty_multiplier: float,
         action_bonus: float,
-        bnh_clamp_negative_terminal: bool,
     ) -> Tuple[Any, ReplayBufferState, chex.PRNGKey, chex.Array]:
         """Collect ``num_steps`` transitions for ALL agents in parallel.
 
@@ -614,10 +576,8 @@ class TradingERLWorkflow:
             key,
             jnp.asarray(int(num_steps), dtype=jnp.int32),
             jnp.asarray(force_explore, dtype=jnp.bool_),
-            jnp.asarray(bnh_multiplier, dtype=jnp.float32),
             jnp.asarray(loss_penalty_multiplier, dtype=jnp.float32),
             jnp.asarray(action_bonus, dtype=jnp.float32),
-            jnp.asarray(bnh_clamp_negative_terminal, dtype=jnp.bool_),
         )
         return env_states, buf, key, total_reward
 
@@ -691,10 +651,8 @@ class TradingERLWorkflow:
         self,
         stacked_params: TradingNetworkParams,
         key: chex.PRNGKey,
-        bnh_multiplier: float = 1.0,
         loss_penalty_multiplier: Optional[float] = None,
         action_bonus: float = 0.0,
-        bnh_clamp_negative_terminal: bool = True,
     ) -> Tuple[chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, chex.Array, Dict[str, chex.Array]]:
         """Validate all agents in parallel on held-out data.
 
@@ -740,15 +698,13 @@ class TradingERLWorkflow:
         all_ep_max_coeff: list[chex.Array] = []
 
         vmap_excess = None
-        if hasattr(self.val_env, "episode_buyhold_excess_usd"):
+        if hasattr(self.val_env, "episode_alpha_sum_usd"):
+            vmap_excess = jax.vmap(self.val_env.episode_alpha_sum_usd)
+        elif hasattr(self.val_env, "episode_buyhold_excess_usd"):
             vmap_excess = jax.vmap(self.val_env.episode_buyhold_excess_usd)
 
-        val_erp = getattr(self.val_env, "episode_reward_multiplier", 1.0)
         if loss_penalty_multiplier is None:
             loss_penalty_multiplier = getattr(self.val_env, "loss_penalty_multiplier", 1.25)
-
-        val_erp_j = jnp.asarray(val_erp, dtype=jnp.float32)
-        bnh_m_j = jnp.asarray(bnh_multiplier, dtype=jnp.float32)
 
         for ep in range(n_episodes):
             key, ep_key = random.split(key)
@@ -788,25 +744,6 @@ class TradingERLWorkflow:
                     stacked_params, env_states.obs, action_keys,
                 )
                 next_states = self._vmap_val_step(env_states, all_actions)
-
-                excess = next_states.env_state.episode_benchmark_excess
-                if bnh_multiplier != 1.0:
-                    bnh_adj = jnp.where(
-                        next_states.done,
-                        excess * val_erp * (bnh_multiplier - 1.0),
-                        0.0,
-                    )
-                    next_states = next_states.replace(
-                        reward=next_states.reward + bnh_adj,
-                    )
-                if bnh_clamp_negative_terminal:
-                    excess = next_states.env_state.episode_benchmark_excess
-                    full_bnh = excess * val_erp_j * bnh_m_j
-                    clip_bnh = jnp.maximum(excess, 0.0) * val_erp_j * bnh_m_j
-                    next_states = next_states.replace(
-                        reward=next_states.reward
-                        + jnp.where(next_states.done, clip_bnh - full_bnh, 0.0),
-                    )
 
                 step_coeff = jnp.max(all_actions[:, :, 0], axis=-1)
                 ep_max_coeff = jnp.where(
@@ -895,7 +832,7 @@ class TradingERLWorkflow:
         }
         return fitness, mean_excess, val_roi_pct, mean_pnl, reward_mean, reward_min, per_episode
 
-    def _gauntlet_single_episode_bn_excess(
+    def _gauntlet_single_episode_alpha_sum(
         self,
         stacked_params: TradingNetworkParams,
         key: chex.PRNGKey,
@@ -922,16 +859,13 @@ class TradingERLWorkflow:
             max_steps = 10_000 + _slack
 
         vmap_excess = None
-        if hasattr(target_env, "episode_buyhold_excess_usd"):
+        if hasattr(target_env, "episode_alpha_sum_usd"):
+            vmap_excess = jax.vmap(target_env.episode_alpha_sum_usd)
+        elif hasattr(target_env, "episode_buyhold_excess_usd"):
             vmap_excess = jax.vmap(target_env.episode_buyhold_excess_usd)
 
-        val_erp = getattr(target_env, "episode_reward_multiplier", 1.0)
         loss_penalty_multiplier = getattr(target_env, "loss_penalty_multiplier", 1.25)
-        val_erp_j = jnp.asarray(val_erp, dtype=jnp.float32)
-        bnh_m_j = jnp.asarray(1.0, dtype=jnp.float32)
-        bnh_multiplier = 1.0
         action_bonus = 0.0
-        bnh_clamp_negative_terminal = False
 
         env_states = vmap_reset(reset_keys)
         env_states = env_states.replace(
@@ -956,25 +890,6 @@ class TradingERLWorkflow:
             )
             next_states = vmap_step(env_states, all_actions)
 
-            excess = next_states.env_state.episode_benchmark_excess
-            if bnh_multiplier != 1.0:
-                bnh_adj = jnp.where(
-                    next_states.done,
-                    excess * val_erp * (bnh_multiplier - 1.0),
-                    0.0,
-                )
-                next_states = next_states.replace(
-                    reward=next_states.reward + bnh_adj,
-                )
-            if bnh_clamp_negative_terminal:
-                excess = next_states.env_state.episode_benchmark_excess
-                full_bnh = excess * val_erp_j * bnh_m_j
-                clip_bnh = jnp.maximum(excess, 0.0) * val_erp_j * bnh_m_j
-                next_states = next_states.replace(
-                    reward=next_states.reward
-                    + jnp.where(next_states.done, clip_bnh - full_bnh, 0.0),
-                )
-
             newly_done = next_states.done & ~done_mask
             if vmap_excess is not None:
                 ex = vmap_excess(next_states)
@@ -989,7 +904,7 @@ class TradingERLWorkflow:
         stacked_params: TradingNetworkParams,
         key: chex.PRNGKey,
     ) -> Dict[str, Any]:
-        """HoF gauntlet: shared validation episode + holdout episode; raw BNH excess each.
+        """HoF gauntlet: shared validation episode + holdout episode; raw alpha sum each.
 
         Requires ``holdout_env`` and holdout vmapped fns. Returns host-ready dict
         (NumPy) including ``val_reset_key_uint32`` for reproducibility.
@@ -999,7 +914,7 @@ class TradingERLWorkflow:
 
         key, k_val_reset, k_hold_reset, k_steps = random.split(key, 4)
         k_val_steps, k_hold_steps = random.split(k_steps)
-        val_excess = self._gauntlet_single_episode_bn_excess(
+        val_excess = self._gauntlet_single_episode_alpha_sum(
             stacked_params,
             k_val_steps,
             self.val_env,
@@ -1007,7 +922,7 @@ class TradingERLWorkflow:
             self._vmap_val_step,
             shared_reset_key=k_val_reset,
         )
-        hold_excess = self._gauntlet_single_episode_bn_excess(
+        hold_excess = self._gauntlet_single_episode_alpha_sum(
             stacked_params,
             k_hold_steps,
             self.holdout_env,
@@ -1020,6 +935,9 @@ class TradingERLWorkflow:
         return {
             "val_bn_excess": np.asarray(jax.device_get(val_excess), dtype=np.float64),
             "hold_bn_excess": np.asarray(jax.device_get(hold_excess), dtype=np.float64),
+            # Preferred naming for Daily Alpha regime (legacy bn_excess kept for compatibility).
+            "val_alpha_sum_usd": np.asarray(jax.device_get(val_excess), dtype=np.float64),
+            "hold_alpha_sum_usd": np.asarray(jax.device_get(hold_excess), dtype=np.float64),
             "gauntlet_score": np.asarray(
                 jax.device_get(val_excess + hold_excess), dtype=np.float64
             ),
@@ -1116,13 +1034,9 @@ class TradingERLWorkflow:
             t_init_s = time.perf_counter() - t_init_start
             print(f" {t_init_s:.1f}s", flush=True)
 
-        # Tracking state to linearly ramp up BnH penalty after forced exploration
+        # Tracking state to linearly ramp up penalties after forced exploration
         if not hasattr(self, "_forced_exploration_ended_gen"):
             self._forced_exploration_ended_gen = -1
-
-        # Terminal BnH in rewards: clamp negative excess to 0 unless the unlock gate is on
-        # (≥4 of top-5-by-fitness with mean BnH excess > 0 for two consecutive generations).
-        bnh_clamp_negative_terminal = not self._allow_negative_bnh_terminal_next_gen
 
         # Phase 1 — collect experience (vmapped)
         buffer_pct = 0.0
@@ -1135,14 +1049,12 @@ class TradingERLWorkflow:
         base_loss_multiplier = float(getattr(self.env, "loss_penalty_multiplier", 1.25))
 
         if is_forced_explore:
-            _clamp_note = " BnH≥0-only" if bnh_clamp_negative_terminal else ""
             print(
-                f"  > Collect (forced exploration > 1.0; buffer {buffer_pct*100:.1f}%){_clamp_note}...",
+                f"  > Collect (forced exploration > 1.0; buffer {buffer_pct*100:.1f}%)...",
                 end="",
                 flush=True,
             )
             self._forced_exploration_ended_gen = -1  # Reset if we somehow dip back
-            bnh_multiplier = 0.0
             loss_penalty_multiplier = 0.0
             
             # Action bonus for first half of forced exploration
@@ -1160,15 +1072,11 @@ class TradingERLWorkflow:
             
             if gens_since_end < self.config.bnh_penalty_warmup_gens:
                 warmup_progress = float(gens_since_end) / float(self.config.bnh_penalty_warmup_gens)
-                bnh_multiplier = warmup_progress
                 loss_penalty_multiplier = base_loss_multiplier * warmup_progress
-                _cw = " BnH≥0-only" if bnh_clamp_negative_terminal else ""
-                print(f"  > Collect (warm-up penalties {warmup_progress:.2f}x){_cw}...", end="", flush=True)
+                print(f"  > Collect (warm-up penalties {warmup_progress:.2f}x)...", end="", flush=True)
             else:
-                bnh_multiplier = 1.0
                 loss_penalty_multiplier = base_loss_multiplier
-                _cw = " BnH≥0-only" if bnh_clamp_negative_terminal else ""
-                print(f"  > Collect{_cw}...", end="", flush=True)
+                print("  > Collect...", end="", flush=True)
                 
             action_bonus = 0.0
             
@@ -1182,10 +1090,8 @@ class TradingERLWorkflow:
                 collect_key,
                 self.config.steps_per_agent,
                 is_forced_explore,
-                bnh_multiplier,
                 loss_penalty_multiplier,
                 action_bonus,
-                bnh_clamp_negative_terminal,
             )
         )
         self.total_env_steps += self.config.steps_per_agent * self._pop_size
@@ -1224,10 +1130,8 @@ class TradingERLWorkflow:
             self._validate_population(
                 self._stacked_params,
                 val_key,
-                bnh_multiplier=bnh_multiplier,
                 loss_penalty_multiplier=loss_penalty_multiplier,
                 action_bonus=action_bonus,
-                bnh_clamp_negative_terminal=bnh_clamp_negative_terminal,
             )
         )
         t_val_s = time.perf_counter() - t_val_start
@@ -1254,26 +1158,6 @@ class TradingERLWorkflow:
         else:
             top5_indices = []
             top5_fitness = []
-
-        # Unlock full terminal BnH (incl. negatives) next gen iff ≥4 of top-5-by-fitness
-        # have strictly positive mean validation BnH excess, for two consecutive gens.
-        # (Top-by-fitness so the quorum matches agents selection actually favors.)
-        _bnh_top5_pos_need = 4
-        _bnh_unlock_streak_need = 2
-        n_top5_bh_pos = 0
-        if n_agents >= 5:
-            top5_for_bh = np.argsort(-fit_np, kind="stable")[:5]
-            n_top5_bh_pos = int(np.sum(bh_np[top5_for_bh] > 0.0))
-            if n_top5_bh_pos >= _bnh_top5_pos_need:
-                self._bnh_quorum_streak += 1
-            else:
-                self._bnh_quorum_streak = 0
-            self._allow_negative_bnh_terminal_next_gen = (
-                self._bnh_quorum_streak >= _bnh_unlock_streak_need
-            )
-        else:
-            self._bnh_quorum_streak = 0
-            self._allow_negative_bnh_terminal_next_gen = False
 
         _wr_per_ep = per_ep_np["num_wins"] / np.maximum(per_ep_np["num_trades"], 1)
         win_rate_np = np.mean(_wr_per_ep, axis=0)  # [pop_size]
@@ -1378,11 +1262,8 @@ class TradingERLWorkflow:
             "top5_roi_pct": [float(roi_np[i]) for i in top5_indices],
             "top5_pnl": [float(pnl_np[i]) for i in top5_indices],
             "top5_bh_excess_usd": [float(bh_np[i]) for i in top5_indices],
+            "top5_alpha_sum_usd": [float(bh_np[i]) for i in top5_indices],
             "top5_win_rate": [float(win_rate_np[i]) for i in top5_indices],
-            "bnh_terminal_clamp_active": bool(bnh_clamp_negative_terminal),
-            "bnh_full_terminal_next_gen": bool(self._allow_negative_bnh_terminal_next_gen),
-            "bnh_quorum_streak": int(self._bnh_quorum_streak),
-            "bnh_top5_positive_bh_count": int(n_top5_bh_pos),
             "best_agent_val_episodes": best_episodes,
             "timing_init_s": float(t_init_s),
             "timing_collect_s": float(t_collect_s),
@@ -1440,7 +1321,6 @@ class TradingERLWorkflow:
         fitness, _, _, _, _, _, _ = self._validate_population(
             self._stacked_params,
             eval_key,
-            bnh_clamp_negative_terminal=False,
         )
         best_idx = int(jnp.argmax(fitness))
 

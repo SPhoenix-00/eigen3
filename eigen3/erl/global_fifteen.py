@@ -32,6 +32,7 @@ META_FILENAME = "global_fifteen.json"
 class GlobalFifteenEntry:
     agent_id: int
     gauntlet_score: float
+    # Legacy field names kept for storage compatibility; values are Daily Alpha sums ($).
     val_bn_excess: float
     hold_bn_excess: float
     promoted_at_generation: int
@@ -39,15 +40,21 @@ class GlobalFifteenEntry:
     source_hof_agent_id: int
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        # Preferred aliases in Daily Alpha terminology.
+        d["val_alpha_sum_usd"] = d["val_bn_excess"]
+        d["hold_alpha_sum_usd"] = d["hold_bn_excess"]
+        return d
 
     @staticmethod
     def from_dict(data: dict) -> "GlobalFifteenEntry":
+        val = data.get("val_bn_excess", data.get("val_alpha_sum_usd", 0.0))
+        hold = data.get("hold_bn_excess", data.get("hold_alpha_sum_usd", 0.0))
         return GlobalFifteenEntry(
             agent_id=int(data["agent_id"]),
             gauntlet_score=float(data["gauntlet_score"]),
-            val_bn_excess=float(data["val_bn_excess"]),
-            hold_bn_excess=float(data["hold_bn_excess"]),
+            val_bn_excess=float(val),
+            hold_bn_excess=float(hold),
             promoted_at_generation=int(data["promoted_at_generation"]),
             source_run_name=str(data.get("source_run_name", "")),
             source_hof_agent_id=int(data.get("source_hof_agent_id", -1)),

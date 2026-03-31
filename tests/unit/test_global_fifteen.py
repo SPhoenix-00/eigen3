@@ -44,3 +44,6 @@ def test_snapshot_sorted_desc(g15: GlobalFifteen) -> None:
     g15.add_or_replace(p, 9.0, 5.0, 4.0, 1, "r", 2)
     snap = g15.snapshot_entries_sorted()
     assert [e.gauntlet_score for e in snap] == [9.0, 1.0]
+    d = snap[0].to_dict()
+    assert "val_alpha_sum_usd" in d and d["val_alpha_sum_usd"] == d["val_bn_excess"]
+    assert "hold_alpha_sum_usd" in d and d["hold_alpha_sum_usd"] == d["hold_bn_excess"]

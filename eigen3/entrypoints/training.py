@@ -334,8 +334,8 @@ def _maybe_run_hof_gauntlet(
     out = workflow.gauntlet_evaluate(stacked, gauntlet_key)
     print(f"  Gauntlet rollouts done ({time.perf_counter() - t_g_start:.1f}s).", flush=True)
 
-    val_bn = out["val_bn_excess"]
-    hold_bn = out["hold_bn_excess"]
+    val_bn = out.get("val_alpha_sum_usd", out["val_bn_excess"])
+    hold_bn = out.get("hold_alpha_sum_usd", out["hold_bn_excess"])
     gscore = out["gauntlet_score"]
 
     purge_ids: list[int] = []
@@ -351,9 +351,13 @@ def _maybe_run_hof_gauntlet(
         row: dict[str, Any] = {
             "hof_agent_id": entry.agent_id,
             "hof_generation": entry.generation,
+            "val_alpha_sum_usd": v,
+            "hold_alpha_sum_usd": h,
+            # Backward-compatible aliases for older report readers.
             "val_bn_excess": v,
             "hold_bn_excess": h,
             "gauntlet_score": g,
+            "purged_val_alpha_fail": v <= 0.0,
             "purged_val_bn_fail": v <= 0.0,
             "promoted_global15": False,
             "global15_action": "",
@@ -421,23 +425,20 @@ def _maybe_run_hof_gauntlet(
         f"{promoted_n} admitted or replaced (size now {len(global_fifteen)}/{global_fifteen.capacity}).",
         flush=True,
     )
-    print(
-        "  Per-agent (val/hold BNH excess = terminal vs equal-weight B&H, scaled $):",
-        flush=True,
-    )
+    print("  Per-agent (val/hold alpha-sum $):", flush=True)
     hdr = (
-        f"  {'hof_id':>7} {'val_BNH':>12} {'hold_BNH':>12} {'gauntlet':>12} "
+        f"  {'hof_id':>7} {'val_alpha':>12} {'hold_alpha':>12} {'gauntlet':>12} "
         f"{'purged':>8} {'G15':>5} {'G15_action':<22}"
     )
     print(hdr, flush=True)
     print("  " + "-" * 86, flush=True)
     for r in sorted(per_agent_rows, key=lambda x: x["hof_agent_id"]):
-        purged = "yes" if r["purged_val_bn_fail"] else "no"
+        purged = "yes" if r["purged_val_alpha_fail"] else "no"
         g15 = "yes" if r.get("promoted_global15") else "no"
         act = str(r.get("global15_action") or "")[:22]
         print(
             f"  {r['hof_agent_id']:7d} "
-            f"{r['val_bn_excess']:12.4f} {r['hold_bn_excess']:12.4f} {r['gauntlet_score']:12.4f} "
+            f"{r['val_alpha_sum_usd']:12.4f} {r['hold_alpha_sum_usd']:12.4f} {r['gauntlet_score']:12.4f} "
             f"{purged:>8} {g15:>5} {act:<22}",
             flush=True,
         )

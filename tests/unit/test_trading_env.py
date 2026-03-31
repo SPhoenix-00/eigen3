@@ -130,10 +130,22 @@ class TestTradingEnv:
         # At least one position should open eventually
         assert state.env_state.num_active_positions > 0
 
-    def test_inaction_penalty(self):
-        """Test inaction penalty is applied"""
-        data_array, data_array_full, norm_stats = create_test_data()
-        env = TradingEnv(data_array, data_array_full, norm_stats, inaction_penalty=10.0)
+    def test_daily_alpha_opportunity_cost(self):
+        """Test opportunity cost (negative daily alpha) is applied when in cash during a bull market"""
+        num_days = 1000
+        # Rising prices
+        prices = jnp.linspace(100, 120, num_days).reshape(-1, 1)
+        prices = jnp.tile(prices, (1, 669))
+
+        data_array = jnp.ones((num_days, 669, 5))
+        data_array = data_array.at[:, :, 0].set(prices)
+
+        data_array_full = jnp.zeros((num_days, 669, 9))
+        data_array_full = data_array_full.at[:, :, 1].set(prices)
+
+        norm_stats = {'mean': jnp.zeros(5), 'std': jnp.ones(5)}
+
+        env = TradingEnv(data_array, data_array_full, norm_stats)
 
         key = random.PRNGKey(0)
         state = env.reset(key)
@@ -145,7 +157,7 @@ class TestTradingEnv:
 
         new_state = env.step(state, action)
 
-        # Should receive negative reward (inaction penalty)
+        # Should receive negative reward (opportunity cost for missing the market rise)
         assert new_state.reward < 0
 
     def test_multiple_resets(self):
@@ -374,7 +386,7 @@ class TestRewardSystem:
     """Test reward calculation"""
 
     def test_positive_reward_on_win(self):
-        """Test that wins produce positive rewards"""
+        """Test that wins produce positive rewards (agent beats benchmark by high conviction)"""
         # Create data with price increase
         num_days = 1000
         prices = jnp.linspace(100, 120, num_days).reshape(-1, 1)
@@ -393,18 +405,19 @@ class TestRewardSystem:
         key = random.PRNGKey(0)
         state = env.reset(key)
 
+        # Very high coefficient so a few positions out-scale the 108-share benchmark
         action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
-        action = action.at[:, 0].set(2.0)
-        action = action.at[:, 1].set(5.0)
+        action = action.at[:, 0].set(100.0)
+        action = action.at[:, 1].set(50.0)
 
-        # Run until we get a positive reward
+        # Run until we get a positive reward (after a few positions open)
         for _ in range(50):
             state = env.step(state, action)
             if state.reward > 0:
                 break
 
         # Should eventually get positive reward
-        assert state.env_state.cumulative_reward > -100  # Some threshold
+        assert state.reward > 0
 
     def test_cumulative_reward_tracking(self):
         """Test that cumulative reward is tracked correctly"""
