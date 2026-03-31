@@ -160,8 +160,9 @@ cloud_project_name: "eigen3"         # Prefix inside the bucket (e.g. gs://bucke
 
 # ---------- HoF gauntlet & Global 15 (shared leaderboard) ----------
 # Every N generations: re-evaluate all HoF agents on one shared random validation episode +
-# holdout; purge HoF if validation alpha-sum <= 0; promote double-passers to Global 15 by gauntlet score.
+# holdout; optional HoF purge if validation alpha-sum <= 0; promote double-passers to Global 15 by gauntlet score.
 gauntlet_interval: 20                 # 0 disables
+gauntlet_purge_hof: false             # If true, remove HoF entries with val alpha-sum <= 0 after gauntlet
 global_15_capacity: 15                # Top-N by gauntlet score under EIGEN3_ARTIFACT_ROOT/global_15/ + gs://.../{cloud_project}/global_15/
 gauntlet_bnh_clamp: false             # Reserved legacy flag (gauntlet uses raw alpha-sum pass/fail)
 

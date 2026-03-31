@@ -17,6 +17,7 @@ num_investable_stocks: 1
 investable_start_col: 0
 
 max_positions: 10
+include_portfolio_in_obs: true
 inaction_penalty: 0.0
 coefficient_threshold: 1.0
 min_sale_target: 10.0
@@ -25,6 +26,7 @@ hurdle_rate: 0.005
 conviction_scaling_power: 1.0
 loss_penalty_multiplier: 1.25
 episode_reward_multiplier: 1.0
+bnh_episode_misalignment_multiplier: 2.0
 observation_noise_std: 0.01
 
 # Mono file load (see eigen3.data.load_mono_table)

@@ -20,6 +20,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from eigen3.agents import TradingAgent, params_for_flax_msgpack
 from eigen3.config import (
+    DEFAULT_BNH_EPISODE_MISALIGNMENT_MULTIPLIER,
     DEFAULT_CONVICTION_SCALING_POWER,
     DEFAULT_EPISODE_REWARD_MULTIPLIER,
     DEFAULT_HURDLE_RATE,
@@ -301,6 +302,7 @@ def _maybe_run_hof_gauntlet(
     split: TrainValHoldoutSplit,
 ) -> None:
     """Every ``population.gauntlet_interval`` generations: HoF gauntlet + Global 15 updates."""
+    purge_hof = bool(OmegaConf.select(cfg, "population.gauntlet_purge_hof", default=False))
     interval = int(OmegaConf.select(cfg, "population.gauntlet_interval", default=20))
     if interval <= 0 or workflow.generation % interval != 0 or len(hof) == 0:
         return
@@ -366,14 +368,21 @@ def _maybe_run_hof_gauntlet(
         if v > 0.0 and h > 0.0:
             candidates.append((loaded[i], g, v, h, entry))
 
-    removed = hof.remove_entries_by_agent_ids(purge_ids)
-    if removed:
+    if purge_hof:
+        removed = hof.remove_entries_by_agent_ids(purge_ids)
+        if removed:
+            print(
+                f"  Purged from HoF (val BNH <= 0): {len(removed)} — ids {removed}",
+                flush=True,
+            )
+        else:
+            print("  Purged from HoF: 0 (all agents positive val BNH).", flush=True)
+    else:
+        removed = []
         print(
-            f"  Purged from HoF (val BNH <= 0): {len(removed)} — ids {removed}",
+            f"  HoF purge: disabled (observation only). Val BNH <= 0: {len(purge_ids)} agent(s).",
             flush=True,
         )
-    else:
-        print("  Purged from HoF: 0 (all agents positive val BNH).", flush=True)
 
     candidates.sort(key=lambda t: -t[1])
     for params_i, g, v, h, ent in candidates:
@@ -412,7 +421,9 @@ def _maybe_run_hof_gauntlet(
         "split": split_info,
         "val_reset_key_uint32": out["val_reset_key_uint32"],
         "hold_reset_key_uint32": out["hold_reset_key_uint32"],
+        "gauntlet_purge_hof": purge_hof,
         "purged_hof_agent_ids": removed,
+        "would_purge_hof_agent_ids": purge_ids,
         "per_agent_rows": per_agent_rows,
         "global_15_snapshot": global_fifteen.to_snapshot_dicts(),
     }
@@ -428,7 +439,7 @@ def _maybe_run_hof_gauntlet(
     print("  Per-agent (val/hold alpha-sum $):", flush=True)
     hdr = (
         f"  {'hof_id':>7} {'val_alpha':>12} {'hold_alpha':>12} {'gauntlet':>12} "
-        f"{'purged':>8} {'G15':>5} {'G15_action':<22}"
+        f"{'val<=0':>8} {'G15':>5} {'G15_action':<22}"
     )
     print(hdr, flush=True)
     print("  " + "-" * 86, flush=True)
@@ -454,10 +465,12 @@ def _maybe_run_hof_gauntlet(
     print("=" * 60 + "\n", flush=True)
 
     logger.info(
-        "HoF gauntlet gen=%s: %d agents, purged=%d, G15 promoted=%d | %s",
+        "HoF gauntlet gen=%s: %d agents, purged=%d, purge_on=%s, val_nonpos=%d, G15 promoted=%d | %s",
         workflow.generation,
         n_hof,
         len(removed),
+        purge_hof,
+        len(purge_ids),
         promoted_n,
         paths["json"],
     )
@@ -900,6 +913,9 @@ def build_networks(cfg: DictConfig) -> tuple[Actor, DoubleCritic]:
     nf = int(_env("num_features_obs", 5))
     ni = int(_env("num_investable_stocks", 108))
     istart = int(_env("investable_start_col", 9))
+    mp = int(_env("max_positions", 10))
+    include_pf = bool(_env("include_portfolio_in_obs", True))
+    portfolio_dim = (2 + 3 * mp) if include_pf else 0
     chunk = int(_agent_fe("chunk_size", 64))
     use_remat_a = OmegaConf.select(cfg, "agent.actor_network.use_remat", default=True)
     use_remat_c = OmegaConf.select(cfg, "agent.critic_network.use_remat", default=True)
@@ -910,6 +926,7 @@ def build_networks(cfg: DictConfig) -> tuple[Actor, DoubleCritic]:
     actor = Actor(
         num_columns=nc,
         num_features=nf,
+        portfolio_dim=portfolio_dim,
         num_investable_stocks=ni,
         investable_start_col=istart,
         column_chunk_size=chunk,
@@ -920,6 +937,7 @@ def build_networks(cfg: DictConfig) -> tuple[Actor, DoubleCritic]:
     critic = DoubleCritic(
         num_columns=nc,
         num_features=nf,
+        portfolio_dim=portfolio_dim,
         num_investable_stocks=ni,
         column_chunk_size=chunk,
         use_remat=use_remat_c,
@@ -1215,6 +1233,11 @@ def _run_training_impl(cfg: DictConfig) -> List[dict[str, Any]]:
             episode_reward_multiplier=_env_cfg(
                 "episode_reward_multiplier", DEFAULT_EPISODE_REWARD_MULTIPLIER
             ),
+            bnh_episode_misalignment_multiplier=_env_cfg(
+                "bnh_episode_misalignment_multiplier",
+                DEFAULT_BNH_EPISODE_MISALIGNMENT_MULTIPLIER,
+            ),
+            include_portfolio_in_obs=bool(_env_cfg("include_portfolio_in_obs", True)),
         )
 
     env = _make_env(train_obs, train_full, dates_train, is_training=True)

@@ -23,6 +23,8 @@ max_holding_period: 30
 
 # Position limits
 max_positions: 10
+# Concatenate open-lot summary to observations (sum coefs, days since last buy, per-slot triples)
+include_portfolio_in_obs: true
 max_trades_per_day: 5
 
 # Rewards and penalties (Eigen2)
@@ -33,6 +35,7 @@ conviction_scaling_power: 1.0
 forced_exit_penalty_pct: 0.01
 loss_penalty_multiplier: 1.25
 episode_reward_multiplier: 1.0
+bnh_episode_misalignment_multiplier: 2.0
 
 # Sale target bounds
 min_sale_target: 10.0

@@ -16,6 +16,7 @@ from evorl.types import PyTreeData, pytree_field
 from evorl.envs import Env
 
 from eigen3.config import (
+    DEFAULT_BNH_EPISODE_MISALIGNMENT_MULTIPLIER,
     DEFAULT_CONVICTION_SCALING_POWER,
     DEFAULT_EPISODE_REWARD_MULTIPLIER,
     DEFAULT_HURDLE_RATE,
@@ -79,7 +80,11 @@ class TradingEnv(Env):
       row index to its ordinal day number (``datetime.date.toordinal()``).
     - All remaining positions liquidated at episode end
 
-    Observation: [context_days, num_columns, num_features] normalized window
+    Observation: [context_days, num_columns, num_features] normalized market window; when
+    ``include_portfolio_in_obs`` is True, ``num_features`` is ``num_market_features +
+    portfolio_obs_dim`` with a broadcast portfolio tail (same vector at every ``(t, col)``):
+    global sum of open coefficients, calendar days since most recent buy, then per-slot
+    triples ``[entry_price, coefficient, buy_date_ordinal]`` (inactive slots zero).
     Action: [num_investable_stocks, 3] with [coefficient, sale_target, close_fraction] per stock.
         close_fraction in [0, 1]: fraction of open lots on that stock to close at market when
         the min-holding rule is satisfied (FIFO by entry step).
@@ -168,6 +173,8 @@ class TradingEnv(Env):
         is_training: bool = True,
         dates_ordinal=None,
         episode_reward_multiplier: float = DEFAULT_EPISODE_REWARD_MULTIPLIER,
+        bnh_episode_misalignment_multiplier: float = DEFAULT_BNH_EPISODE_MISALIGNMENT_MULTIPLIER,
+        include_portfolio_in_obs: bool = True,
     ):
         """Initialize trading environment.
 
@@ -203,6 +210,11 @@ class TradingEnv(Env):
                 When ``None``, defaults to ``arange(num_days)`` (1 row = 1 calendar day).
             episode_reward_multiplier: Scale factor for the per-episode bonus/penalty
                 (agent PnL vs buy-and-hold benchmark).
+            bnh_episode_misalignment_multiplier: Applied to the episode-wide BNH excess term when
+                (agent PnL <= 0 and equal-weight benchmark return > 0) or
+                (agent PnL > 0 and benchmark return < 0) over the episode.
+            include_portfolio_in_obs: If True, append a fixed-size portfolio vector to each
+                observation frame (see module docstring). Scalars are mildly scaled for NN stability.
         """
         self.data_array = jnp.array(data_array, dtype=jnp.float32)
         self.data_array_full = jnp.array(data_array_full, dtype=jnp.float32)
@@ -237,6 +249,9 @@ class TradingEnv(Env):
         self.observation_noise_std = observation_noise_std
         self.is_training = is_training
         self.episode_reward_multiplier = episode_reward_multiplier
+        self.bnh_episode_misalignment_multiplier = bnh_episode_misalignment_multiplier
+        self.include_portfolio_in_obs = bool(include_portfolio_in_obs)
+        self.num_market_features = int(self.data_array.shape[2])
 
         # Calendar-based episode: inclusive span episode_calendar_days on dates_ordinal.
         (
@@ -254,10 +269,18 @@ class TradingEnv(Env):
         self.max_start_idx = int(self._valid_start_indices.max()) if self._valid_start_indices.size > 0 else num_days - 1
 
     @property
+    def portfolio_obs_dim(self) -> int:
+        """Tail feature size appended to each obs cell when ``include_portfolio_in_obs``."""
+        if not self.include_portfolio_in_obs:
+            return 0
+        return 2 + 3 * int(self.max_positions)
+
+    @property
     def obs_space(self):
         """Observation space"""
         from evorl.envs import Box
-        shp = (self.context_window_days, self.data_array.shape[1], self.data_array.shape[2])
+        f = self.num_market_features + self.portfolio_obs_dim
+        shp = (self.context_window_days, self.data_array.shape[1], f)
         return Box(low=jnp.full(shp, -jnp.inf), high=jnp.full(shp, jnp.inf))
 
     @property
@@ -427,9 +450,29 @@ class TradingEnv(Env):
 
         step_reward = daily_alpha * self.episode_reward_multiplier
 
-        # 5. Move to next step
-        new_step = env_state.current_step + 1
+        # 5. Terminal episode shaping: full-window BNH excess (+ misalignment multiplier).
         done = new_step >= env_state.end_step
+        end_row = jnp.clip(new_step - 1, 0, self.data_array_full.shape[0] - 1)
+        excess, avg_ret = self._episode_bnh_excess_and_avg_return(
+            env_state.start_step, end_row, new_total_pnl, new_peak
+        )
+        misalign = ((new_total_pnl <= 0) & (avg_ret > 0)) | ((new_total_pnl > 0) & (avg_ret < 0))
+        mult = jnp.where(
+            misalign,
+            jnp.asarray(self.bnh_episode_misalignment_multiplier, dtype=jnp.float32),
+            jnp.asarray(1.0, dtype=jnp.float32),
+        )
+        term_raw = (
+            excess
+            * jnp.asarray(self.episode_reward_multiplier, dtype=jnp.float32)
+            * mult
+        )
+        term_shaped = jnp.where(
+            term_raw >= 0,
+            term_raw,
+            term_raw * env_state.loss_penalty_multiplier,
+        )
+        step_reward = step_reward + jnp.where(done, term_shaped, 0.0)
 
         # Persist for metrics / HoF: accumulate daily alpha over the episode
         new_alpha_sum = env_state.episode_alpha_sum + daily_alpha
@@ -473,7 +516,8 @@ class TradingEnv(Env):
             key: JAX PRNG key for observation noise (used when is_training and observation_noise_std > 0)
 
         Returns:
-            Normalized window [context_days, num_columns, num_features]
+            Tensor [context_days, num_columns, num_market_features] or with portfolio tail
+            when ``include_portfolio_in_obs`` (last dim = market + ``portfolio_obs_dim``).
         """
         # Extract window ending at current step
         start = env_state.current_step - self.context_window_days + 1
@@ -501,7 +545,39 @@ class TradingEnv(Env):
             noise = jax.random.normal(key, normalized.shape) * self.observation_noise_std
             normalized = normalized * (1.0 + noise)
 
-        return normalized
+        if not self.include_portfolio_in_obs:
+            return normalized
+
+        port = self._portfolio_obs_vector(env_state)
+        t, c, _ = normalized.shape
+        port_broadcast = jnp.broadcast_to(port, (t, c, port.shape[0]))
+        return jnp.concatenate([normalized, port_broadcast], axis=-1)
+
+    def _portfolio_obs_vector(self, env_state: TradingEnvState) -> chex.Array:
+        """Portfolio tail [sum_coef_scaled, days_since_buy_scaled, flat slot triples]."""
+        pos = env_state.positions
+        active = pos[:, 5] > 0.5
+        coefs = pos[:, 4]
+        sum_coef = jnp.sum(jnp.where(active, coefs, 0.0))
+        entry_steps = pos[:, 1].astype(jnp.int32)
+        masked_entry = jnp.where(active, entry_steps, jnp.iinfo(jnp.int32).min)
+        most_recent = jnp.max(masked_entry)
+        has_any = jnp.any(active)
+        gap = jnp.where(
+            has_any,
+            self._calendar_gap(env_state.current_step, most_recent).astype(jnp.float32),
+            jnp.float32(0.0),
+        )
+        v0 = sum_coef / jnp.float32(100.0)
+        v1 = gap / jnp.float32(366.0)
+        n = self.dates_ordinal.shape[0]
+        entry_clamped = jnp.clip(entry_steps, 0, n - 1)
+        buy_ord = self.dates_ordinal[entry_clamped].astype(jnp.float32)
+        slot_prices = jnp.where(active, pos[:, 2], 0.0) / jnp.float32(1000.0)
+        slot_coefs = jnp.where(active, coefs, 0.0) / jnp.float32(100.0)
+        slot_dates = jnp.where(active, buy_ord / jnp.float32(730_000.0), 0.0)
+        slots = jnp.reshape(jnp.stack([slot_prices, slot_coefs, slot_dates], axis=-1), (-1,))
+        return jnp.concatenate([jnp.stack([v0, v1]), slots])
 
     def _calendar_gap(self, step_a: chex.Array, step_b: chex.Array) -> chex.Array:
         """Calendar-day difference ``dates_ordinal[step_a] - dates_ordinal[step_b]``.
@@ -514,24 +590,20 @@ class TradingEnv(Env):
         b = jnp.clip(step_b, 0, n - 1).astype(jnp.int32)
         return self.dates_ordinal[a] - self.dates_ordinal[b]
 
-    def _compute_episode_bonus(
+    def _episode_bnh_excess_and_avg_return(
         self,
-        env_state: TradingEnvState,
+        start_step: chex.Array,
+        end_row: chex.Array,
         total_pnl: chex.Array,
         peak_capital: chex.Array,
-    ) -> chex.Array:
-        """Per-episode reward: agent PnL vs buy-and-hold benchmark.
+    ) -> Tuple[chex.Array, chex.Array]:
+        """Episode-wide agent PnL minus buy-and-hold benchmark, and equal-weight avg return.
 
         When the agent deployed capital, the benchmark is peak capital employed
-        times the equal-weight average return from episode start to the
-        terminal row. When peak capital is zero (idle episode), coefficient 1
-        means one share per investable name bought at the episode start price:
-        benchmark dollar PnL is the sum of ``end - start`` per stock (mono:
-        one share of that stock).
+        times the equal-weight average return from episode start to ``end_row``.
+        When peak capital is zero (idle episode), coefficient 1 means one share per
+        investable name at start prices: benchmark dollar PnL is sum of ``end - start``.
         """
-        start_step = env_state.start_step
-        current_step = env_state.current_step
-
         start_prices = jax.lax.dynamic_slice(
             self.data_array_full[:, :, 1],
             (start_step, self.investable_start_col),
@@ -539,7 +611,7 @@ class TradingEnv(Env):
         ).squeeze(0)
         end_prices = jax.lax.dynamic_slice(
             self.data_array_full[:, :, 1],
-            (current_step, self.investable_start_col),
+            (end_row, self.investable_start_col),
             (1, self.num_investable_stocks),
         ).squeeze(0)
 
@@ -557,7 +629,8 @@ class TradingEnv(Env):
         active_bnh = peak_capital * avg_return
         idle_bnh = jnp.sum(jnp.where(valid, end_prices - start_prices, 0.0))
         benchmark_pnl = jnp.where(peak_capital > 0, active_bnh, idle_bnh)
-        return (total_pnl - benchmark_pnl)
+        excess = total_pnl - benchmark_pnl
+        return excess, avg_return
 
     def episode_alpha_sum_usd(self, state: EnvState) -> jnp.ndarray:
         """Episode-wide sum of unscaled daily alpha in dollar units."""
@@ -888,9 +961,10 @@ def test_trading_env():
     state = env.reset(key)
 
     print(f"✓ Reset successful")
+    f_tot = env.num_market_features + env.portfolio_obs_dim
     print(f"  Observation shape: {state.obs.shape}")
-    print(f"  Expected: (151, 117, 5)")
-    assert state.obs.shape == (151, 117, 5)
+    print(f"  Expected: (151, 117, {f_tot})")
+    assert state.obs.shape == (151, 117, f_tot)
 
     # Test step
     action = jnp.ones((108, 3))
@@ -904,7 +978,7 @@ def test_trading_env():
     print(f"  Observation shape: {new_state.obs.shape}")
     print(f"  Reward: {new_state.reward}")
     print(f"  Done: {new_state.done}")
-    assert new_state.obs.shape == (151, 117, 5)
+    assert new_state.obs.shape == (151, 117, f_tot)
 
     # Run multiple steps
     print("\nRunning 10 steps...")

@@ -16,3 +16,7 @@ DEFAULT_LOSS_PENALTY_MULTIPLIER: float = 1.25
 
 # Scales the per-episode reward/penalty (agent PnL vs buy-and-hold benchmark)
 DEFAULT_EPISODE_REWARD_MULTIPLIER: float = 1.0
+
+# Episode-wide BNH excess is scaled by this when agent vs benchmark direction disagrees
+# with the equal-weight market return (see TradingEnv.step terminal shaping).
+DEFAULT_BNH_EPISODE_MISALIGNMENT_MULTIPLIER: float = 2.0

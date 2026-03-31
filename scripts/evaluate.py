@@ -17,6 +17,7 @@ import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
 
+from eigen3.config import DEFAULT_BNH_EPISODE_MISALIGNMENT_MULTIPLIER
 from eigen3.data import load_trading_data, create_synthetic_data
 from eigen3.data.splits import compute_train_val_holdout_split, slice_trading_timeline
 from eigen3.environment.trading_env import TradingEnv
@@ -62,6 +63,11 @@ def parse_args():
     parser.add_argument("--settlement_period_days", type=int, default=0)
     parser.add_argument("--min_holding_period", type=int, default=30)
     parser.add_argument("--max_positions", type=int, default=10)
+    parser.add_argument(
+        "--no_portfolio_obs",
+        action="store_true",
+        help="Omit portfolio tail in observations (must match how the checkpoint was trained).",
+    )
     parser.add_argument("--num_columns", type=int, default=18)
     parser.add_argument("--num_features_obs", type=int, default=1)
     parser.add_argument("--num_investable_stocks", type=int, default=1)
@@ -75,6 +81,12 @@ def parse_args():
     parser.add_argument("--loss_penalty_multiplier", type=float, default=1.25)
     parser.add_argument("--conviction_scaling_power", type=float, default=1.0)
     parser.add_argument("--episode_reward_multiplier", type=float, default=1.0)
+    parser.add_argument(
+        "--bnh_episode_misalignment_multiplier",
+        type=float,
+        default=DEFAULT_BNH_EPISODE_MISALIGNMENT_MULTIPLIER,
+        help="2x-style scale on episode BNH excess when agent vs market direction disagree.",
+    )
 
     # Network architecture (must match training / checkpoint)
     parser.add_argument("--chunk_size", type=int, default=64)
@@ -240,15 +252,19 @@ def main():
         is_training=False,
         dates_ordinal=dates_holdout,
         episode_reward_multiplier=args.episode_reward_multiplier,
+        bnh_episode_misalignment_multiplier=args.bnh_episode_misalignment_multiplier,
+        include_portfolio_in_obs=not args.no_portfolio_obs,
     )
 
     # --- Build agent & load checkpoint ---
     nc = int(data_obs.shape[1])
     nf = int(data_obs.shape[2])
+    portfolio_dim = (2 + 3 * args.max_positions) if not args.no_portfolio_obs else 0
     use_remat = not args.no_remat
     actor = Actor(
         num_columns=nc,
         num_features=nf,
+        portfolio_dim=portfolio_dim,
         num_investable_stocks=args.num_investable_stocks,
         investable_start_col=args.investable_start_col,
         column_chunk_size=args.chunk_size,
@@ -259,6 +275,7 @@ def main():
     critic = DoubleCritic(
         num_columns=nc,
         num_features=nf,
+        portfolio_dim=portfolio_dim,
         num_investable_stocks=args.num_investable_stocks,
         column_chunk_size=args.chunk_size,
         use_remat=use_remat,
