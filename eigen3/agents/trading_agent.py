@@ -95,8 +95,11 @@ class TradingAgent(Agent):
         """
         actor_key, critic_key = jax.random.split(key, 2)
 
-        # Create dummy inputs for initialization
-        dummy_obs = jnp.zeros((1, *obs_space.shape))
+        # Model input includes the portfolio tail (obs_space is market-only).
+        pdim = getattr(self.actor_network, 'portfolio_dim', 0)
+        model_features = obs_space.shape[-1] + pdim
+        model_shape = (*obs_space.shape[:-1], model_features)
+        dummy_obs = jnp.zeros((1, *model_shape))
         dummy_action = jnp.zeros((1, *action_space.shape))
 
         # Initialize actor network
