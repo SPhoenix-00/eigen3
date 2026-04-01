@@ -113,6 +113,18 @@ def _trading_env_state_from_checkpoint(d: Mapping[str, Any]) -> TradingEnvState:
         episode_alpha_sum=jnp.asarray(
             d.get("episode_alpha_sum", d.get("episode_benchmark_excess", 0.0))
         ),
+        loss_penalty_multiplier=jnp.asarray(
+            d.get("loss_penalty_multiplier", jnp.broadcast_to(
+                jnp.array(1.25, dtype=jnp.float32),
+                jnp.asarray(d["current_step"]).shape,
+            ))
+        ),
+        action_bonus=jnp.asarray(
+            d.get("action_bonus", jnp.broadcast_to(
+                jnp.array(0.0, dtype=jnp.float32),
+                jnp.asarray(d["current_step"]).shape,
+            ))
+        ),
         rng_key=jnp.asarray(d["rng_key"]),
     )
 
@@ -141,6 +153,8 @@ def _env_states_to_checkpoint(es: EnvState) -> dict[str, Any]:
             "peak_capital_employed": np.asarray(jax.device_get(s.peak_capital_employed)),
             "total_pnl": np.asarray(jax.device_get(s.total_pnl)),
             "episode_alpha_sum": np.asarray(jax.device_get(s.episode_alpha_sum)),
+            "loss_penalty_multiplier": np.asarray(jax.device_get(s.loss_penalty_multiplier)),
+            "action_bonus": np.asarray(jax.device_get(s.action_bonus)),
             "rng_key": np.asarray(jax.device_get(s.rng_key)),
         },
     }
