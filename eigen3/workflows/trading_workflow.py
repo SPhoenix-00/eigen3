@@ -32,6 +32,7 @@ from evorl.agent import Agent, AgentState
 from evorl.evaluators import Evaluator
 from eigen3.agents import TradingNetworkParams, soft_target_update
 from eigen3.erl.hall_of_fame import HallOfFame
+from eigen3.models.actor import combine_market_portfolio
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +49,21 @@ def _maybe_enable_jax_compile_logging() -> None:
 # ---------------------------------------------------------------------------
 
 class ReplayBufferState(PyTreeData):
-    """Fixed-capacity ring buffer stored as JAX arrays on device."""
+    """Fixed-capacity ring buffer stored as JAX arrays on device.
+
+    Market observations (``obs`` / ``next_obs``) and compact portfolio
+    vectors (``port_obs`` / ``next_port_obs``) are stored separately so that
+    the buffer size scales with ``num_market_features`` rather than with the
+    broadcast ``num_market_features + portfolio_obs_dim``.
+    """
 
     obs: chex.Array
     actions: chex.Array
     rewards: chex.Array
     next_obs: chex.Array
     dones: chex.Array
+    port_obs: chex.Array      # [capacity, portfolio_obs_dim]
+    next_port_obs: chex.Array  # [capacity, portfolio_obs_dim]
     size: chex.Array
     insert_idx: chex.Array
 
@@ -63,14 +72,18 @@ def create_replay_buffer(
     capacity: int,
     obs_shape: Tuple[int, ...],
     action_shape: Tuple[int, ...],
+    portfolio_obs_dim: int = 0,
 ) -> ReplayBufferState:
     """Allocate an empty replay buffer on the default device."""
+    pdim = max(portfolio_obs_dim, 0)
     return ReplayBufferState(
         obs=jnp.zeros((capacity, *obs_shape), dtype=jnp.float32),
         actions=jnp.zeros((capacity, *action_shape), dtype=jnp.float32),
         rewards=jnp.zeros(capacity, dtype=jnp.float32),
         next_obs=jnp.zeros((capacity, *obs_shape), dtype=jnp.float32),
         dones=jnp.zeros(capacity, dtype=jnp.float32),
+        port_obs=jnp.zeros((capacity, pdim), dtype=jnp.float32),
+        next_port_obs=jnp.zeros((capacity, pdim), dtype=jnp.float32),
         size=jnp.array(0, dtype=jnp.int32),
         insert_idx=jnp.array(0, dtype=jnp.int32),
     )
@@ -83,12 +96,14 @@ def buffer_insert_batch(
     rewards: chex.Array,
     next_obs: chex.Array,
     dones: chex.Array,
+    port_obs: chex.Array | None = None,
+    next_port_obs: chex.Array | None = None,
 ) -> ReplayBufferState:
     """Insert a batch of transitions (shape ``[batch, ...]``) into the ring buffer."""
     batch = obs.shape[0]
     capacity = buf.obs.shape[0]
     indices = (buf.insert_idx + jnp.arange(batch)) % capacity
-    return buf.replace(
+    updates = dict(
         obs=buf.obs.at[indices].set(obs),
         actions=buf.actions.at[indices].set(actions),
         rewards=buf.rewards.at[indices].set(rewards),
@@ -97,22 +112,28 @@ def buffer_insert_batch(
         size=jnp.minimum(buf.size + batch, capacity),
         insert_idx=(buf.insert_idx + batch) % capacity,
     )
+    if port_obs is not None:
+        updates["port_obs"] = buf.port_obs.at[indices].set(port_obs)
+    if next_port_obs is not None:
+        updates["next_port_obs"] = buf.next_port_obs.at[indices].set(next_port_obs)
+    return buf.replace(**updates)
 
 
 def buffer_sample(
     buf: ReplayBufferState,
     key: chex.PRNGKey,
     batch_size: int,
-) -> SampleBatch:
-    """Uniformly sample ``batch_size`` transitions from filled positions."""
+) -> Tuple[SampleBatch, chex.Array, chex.Array]:
+    """Uniformly sample transitions; returns ``(batch, port_obs, next_port_obs)``."""
     indices = jax.random.randint(key, shape=(batch_size,), minval=0, maxval=buf.size)
-    return SampleBatch(
+    batch = SampleBatch(
         obs=buf.obs[indices],
         actions=buf.actions[indices],
         rewards=buf.rewards[indices],
         next_obs=buf.next_obs[indices],
         dones=buf.dones[indices],
     )
+    return batch, buf.port_obs[indices], buf.next_port_obs[indices]
 
 
 # ---------------------------------------------------------------------------
@@ -386,13 +407,13 @@ class TradingERLWorkflow:
         val_env = self.val_env
         agent = self.agent
 
-        def _compute_action_one(params, obs, key, force_explore):
+        def _compute_action_one(params, obs, port_obs, key, force_explore):
+            combined = combine_market_portfolio(obs, port_obs)
             state = AgentState(params=params)
-            actions, _ = agent.compute_actions(state, SampleBatch(obs=obs[None]), key)
+            actions, _ = agent.compute_actions(state, SampleBatch(obs=combined[None]), key)
             act = actions[0]
 
             def override_fn():
-                # Force random coefficients between 1.1 and 3.0
                 rand_coeff = jax.random.uniform(key, (act.shape[0],), minval=1.1, maxval=3.0)
                 return act.at[:, 0].set(rand_coeff)
 
@@ -401,9 +422,10 @@ class TradingERLWorkflow:
 
             return jax.lax.cond(force_explore, override_fn, normal_fn)
 
-        def _eval_action_one(params, obs, key):
+        def _eval_action_one(params, obs, port_obs, key):
+            combined = combine_market_portfolio(obs, port_obs)
             state = AgentState(params=params)
-            actions, _ = agent.evaluate_actions(state, SampleBatch(obs=obs[None]), key)
+            actions, _ = agent.evaluate_actions(state, SampleBatch(obs=combined[None]), key)
             return actions[0]
 
         def _loss_one(params, sample_batch, key):
@@ -448,11 +470,10 @@ class TradingERLWorkflow:
                 env_states, buf, key, total_reward = carry
                 key, step_key, reset_key = random.split(key, 3)
                 action_keys = random.split(step_key, pop_size_int)
-                all_actions = jax.vmap(lambda p, o, k: _compute_action_one(p, o, k, force_explore))(
-                    stacked_params, env_states.obs, action_keys,
+                all_actions = jax.vmap(lambda p, o, po, k: _compute_action_one(p, o, po, k, force_explore))(
+                    stacked_params, env_states.obs, env_states.portfolio_obs, action_keys,
                 )
                 
-                # Apply dynamic curriculum multipliers to environment state before step
                 env_states = env_states.replace(
                     env_state=env_states.env_state.replace(
                         loss_penalty_multiplier=jnp.full_like(env_states.env_state.loss_penalty_multiplier, loss_penalty_multiplier),
@@ -470,6 +491,8 @@ class TradingERLWorkflow:
                     rewards=next_states.reward,
                     next_obs=next_states.obs,
                     dones=next_states.done.astype(jnp.float32),
+                    port_obs=env_states.portfolio_obs,
+                    next_port_obs=next_states.portfolio_obs,
                 )
                 total_reward = total_reward + jnp.sum(next_states.reward)
                 done = next_states.done
@@ -530,8 +553,10 @@ class TradingERLWorkflow:
 
         obs_shape = self.env.obs_space.shape
         action_shape = self.env.action_space.shape
+        pdim = getattr(self.env, 'portfolio_obs_dim', 0)
         self._replay_buffer = create_replay_buffer(
             self.config.replay_buffer_size, obs_shape, action_shape,
+            portfolio_obs_dim=pdim,
         )
 
         self.key, reset_key = random.split(self.key)
@@ -611,7 +636,11 @@ class TradingERLWorkflow:
         for step in range(n_steps):
             key, sample_key, loss_key = random.split(key, 3)
 
-            batch = buffer_sample(buf, sample_key, self.config.batch_size)
+            batch, b_port, b_next_port = buffer_sample(buf, sample_key, self.config.batch_size)
+            batch = batch.replace(
+                obs=combine_market_portfolio(batch.obs, b_port),
+                next_obs=combine_market_portfolio(batch.next_obs, b_next_port),
+            )
             loss_keys = random.split(loss_key, pop_size)
 
             all_losses = self._vmap_loss_all_agents(stacked_params, batch, loss_keys)
@@ -741,7 +770,7 @@ class TradingERLWorkflow:
                 action_keys = random.split(step_key, pop_size)
 
                 all_actions = self._vmap_eval_actions(
-                    stacked_params, env_states.obs, action_keys,
+                    stacked_params, env_states.obs, env_states.portfolio_obs, action_keys,
                 )
                 next_states = self._vmap_val_step(env_states, all_actions)
 
@@ -886,7 +915,7 @@ class TradingERLWorkflow:
             key, step_key = random.split(key)
             action_keys = random.split(step_key, n_agents)
             all_actions = self._vmap_eval_actions(
-                stacked_params, env_states.obs, action_keys,
+                stacked_params, env_states.obs, env_states.portfolio_obs, action_keys,
             )
             next_states = vmap_step(env_states, all_actions)
 

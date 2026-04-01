@@ -543,15 +543,15 @@ class TestIntegrationWithEnvironment:
         key = random.PRNGKey(0)
         state = env.reset(key)
 
-        # Check observation shape
-        nf = env.num_market_features + env.portfolio_obs_dim
+        # Check observation shape (market-only; portfolio stored separately)
+        nf = env.num_market_features
         assert state.obs.shape == (151, 669, nf)
+        assert state.portfolio_obs.shape == (env.portfolio_obs_dim,)
 
         # Step environment
         action = jnp.concatenate([jnp.ones((108, 2)), jnp.zeros((108, 1))], axis=-1)
         new_state = env.step(state, action)
 
-        # Should work without errors
         assert new_state.obs.shape == (151, 669, nf)
 
 

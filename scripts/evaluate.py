@@ -22,7 +22,7 @@ from eigen3.data import load_trading_data, create_synthetic_data
 from eigen3.data.splits import compute_train_val_holdout_split, slice_trading_timeline
 from eigen3.environment.trading_env import TradingEnv
 from eigen3.agents import TradingAgent
-from eigen3.models.actor import Actor
+from eigen3.models.actor import Actor, combine_market_portfolio
 from eigen3.models.critic import DoubleCritic
 from evorl.sample_batch import SampleBatch
 
@@ -135,7 +135,8 @@ def run_episode(env: TradingEnv, agent: TradingAgent, agent_state, key):
     steps = 0
 
     while True:
-        obs_batch = state.obs[None, ...]
+        combined = combine_market_portfolio(state.obs, state.portfolio_obs)
+        obs_batch = combined[None, ...]
         sample = SampleBatch(obs=obs_batch)
         key, act_key = jax.random.split(key)
         actions, _ = agent.evaluate_actions(agent_state, sample, act_key)

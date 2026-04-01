@@ -64,9 +64,12 @@ class TradingEnvState(PyTreeData):
 class EnvState(PyTreeData):
     """EvoRL-compatible environment state"""
     env_state: TradingEnvState
-    obs: chex.Array
+    obs: chex.Array  # market-only: [context_days, num_columns, num_market_features]
     reward: chex.Array
     done: chex.Array
+    portfolio_obs: chex.Array = pytree_field(
+        default_factory=lambda: jnp.zeros(0, dtype=jnp.float32)
+    )
     info: dict = pytree_field(default_factory=dict)
 
 
@@ -277,10 +280,9 @@ class TradingEnv(Env):
 
     @property
     def obs_space(self):
-        """Observation space"""
+        """Observation space (market-only; portfolio stored separately)."""
         from evorl.envs import Box
-        f = self.num_market_features + self.portfolio_obs_dim
-        shp = (self.context_window_days, self.data_array.shape[1], f)
+        shp = (self.context_window_days, self.data_array.shape[1], self.num_market_features)
         return Box(low=jnp.full(shp, -jnp.inf), high=jnp.full(shp, jnp.inf))
 
     @property
@@ -344,14 +346,15 @@ class TradingEnv(Env):
             rng_key=rng_key,
         )
 
-        # Get initial observation (with optional noise when is_training)
         obs = self._get_observation(trading_state, key)
+        portfolio_obs = self._get_portfolio_obs(trading_state)
 
         return EnvState(
             env_state=trading_state,
             obs=obs,
             reward=jnp.array(0.0, dtype=jnp.float32),
             done=jnp.array(False, dtype=jnp.bool_),
+            portfolio_obs=portfolio_obs,
         )
 
     def step(self, state: EnvState, action: chex.Array) -> EnvState:
@@ -498,30 +501,32 @@ class TradingEnv(Env):
             rng_key=next_key,
         )
 
-        # Get new observation (with optional noise when is_training)
         obs = self._get_observation(new_env_state, step_key)
+        portfolio_obs = self._get_portfolio_obs(new_env_state)
 
         return EnvState(
             env_state=new_env_state,
             obs=obs,
             reward=step_reward,
             done=done,
+            portfolio_obs=portfolio_obs,
         )
 
     def _get_observation(self, env_state: TradingEnvState, key: chex.PRNGKey = None) -> chex.Array:
-        """Get normalized observation window (Eigen2: optional multiplicative noise when is_training).
+        """Get normalized market observation window (no portfolio broadcast).
+
+        The portfolio vector is stored separately in ``EnvState.portfolio_obs``
+        and combined with the market obs only at model-forward-pass time to
+        keep the replay buffer compact.
 
         Args:
             env_state: Current trading state
-            key: JAX PRNG key for observation noise (used when is_training and observation_noise_std > 0)
+            key: JAX PRNG key for observation noise
 
         Returns:
-            Tensor [context_days, num_columns, num_market_features] or with portfolio tail
-            when ``include_portfolio_in_obs`` (last dim = market + ``portfolio_obs_dim``).
+            Tensor ``[context_days, num_columns, num_market_features]``.
         """
-        # Extract window ending at current step
         start = env_state.current_step - self.context_window_days + 1
-        end = env_state.current_step + 1
 
         window = jax.lax.dynamic_slice(
             self.data_array,
@@ -529,7 +534,6 @@ class TradingEnv(Env):
             (self.context_window_days, self.data_array.shape[1], self.data_array.shape[2])
         )
 
-        # Normalize (support (C,F) or (F,) norm_stats)
         norm_mean = self.norm_mean
         norm_std = self.norm_std
         if norm_mean.ndim == 1:
@@ -540,18 +544,17 @@ class TradingEnv(Env):
             norm_std = jnp.reshape(norm_std, (1, norm_std.shape[0], norm_std.shape[1]))
         normalized = (window - norm_mean) / (norm_std + 1e-8)
 
-        # Eigen2: multiplicative observation noise for regularization when is_training
         if self.is_training and self.observation_noise_std > 0 and key is not None:
             noise = jax.random.normal(key, normalized.shape) * self.observation_noise_std
             normalized = normalized * (1.0 + noise)
 
-        if not self.include_portfolio_in_obs:
-            return normalized
+        return normalized
 
-        port = self._portfolio_obs_vector(env_state)
-        t, c, _ = normalized.shape
-        port_broadcast = jnp.broadcast_to(port, (t, c, port.shape[0]))
-        return jnp.concatenate([normalized, port_broadcast], axis=-1)
+    def _get_portfolio_obs(self, env_state: TradingEnvState) -> chex.Array:
+        """Compact portfolio vector ``(portfolio_obs_dim,)`` or empty ``(0,)``."""
+        if not self.include_portfolio_in_obs:
+            return jnp.zeros(0, dtype=jnp.float32)
+        return self._portfolio_obs_vector(env_state)
 
     def _portfolio_obs_vector(self, env_state: TradingEnvState) -> chex.Array:
         """Portfolio tail ``[sum_coef_scaled, days_since_buy_scaled, flat slot triples]``.
@@ -971,10 +974,12 @@ def test_trading_env():
     state = env.reset(key)
 
     print(f"✓ Reset successful")
-    f_tot = env.num_market_features + env.portfolio_obs_dim
+    f_mkt = env.num_market_features
     print(f"  Observation shape: {state.obs.shape}")
-    print(f"  Expected: (151, 117, {f_tot})")
-    assert state.obs.shape == (151, 117, f_tot)
+    print(f"  Portfolio obs shape: {state.portfolio_obs.shape}")
+    print(f"  Expected obs: (151, 117, {f_mkt})")
+    assert state.obs.shape == (151, 117, f_mkt)
+    assert state.portfolio_obs.shape == (env.portfolio_obs_dim,)
 
     # Test step
     action = jnp.ones((108, 3))
@@ -988,7 +993,7 @@ def test_trading_env():
     print(f"  Observation shape: {new_state.obs.shape}")
     print(f"  Reward: {new_state.reward}")
     print(f"  Done: {new_state.done}")
-    assert new_state.obs.shape == (151, 117, f_tot)
+    assert new_state.obs.shape == (151, 117, f_mkt)
 
     # Run multiple steps
     print("\nRunning 10 steps...")

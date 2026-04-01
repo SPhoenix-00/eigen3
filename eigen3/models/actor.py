@@ -39,6 +39,32 @@ def split_market_portfolio(
     return state, None
 
 
+def combine_market_portfolio(
+    market_obs: chex.Array,
+    portfolio_obs: chex.Array,
+) -> chex.Array:
+    """Broadcast compact portfolio vector into market obs for model input.
+
+    Inverse of :func:`split_market_portfolio`.  Only used transiently before
+    a forward pass — never stored in the replay buffer.
+
+    Args:
+        market_obs: ``[..., T, C, F]`` market-only observations.
+        portfolio_obs: ``[..., P]`` compact portfolio vector (``P == 0``
+            means portfolio is disabled; returns *market_obs* unchanged).
+    """
+    p = portfolio_obs.shape[-1]
+    if p == 0:
+        return market_obs
+    # Broadcast (P,) to (T, C, P) — works for both batched and unbatched obs.
+    extra_dims = market_obs.shape[:-1]  # (..., T, C)
+    port_broadcast = jnp.broadcast_to(
+        portfolio_obs[..., None, None, :],
+        (*extra_dims, p),
+    )
+    return jnp.concatenate([market_obs, port_broadcast], axis=-1)
+
+
 class Actor(nn.Module):
     """Actor network: outputs [coefficient, sale_target, close_fraction] per stock.
 

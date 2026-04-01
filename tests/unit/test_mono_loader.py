@@ -75,8 +75,8 @@ def test_env_mono_shapes_match_config():
     )
     key = jax.random.PRNGKey(0)
     state = env.reset(key)
-    nf = env.num_market_features + env.portfolio_obs_dim
-    assert state.obs.shape == (151, 18, nf)
+    assert state.obs.shape == (151, 18, env.num_market_features)
+    assert state.portfolio_obs.shape == (env.portfolio_obs_dim,)
 
     actor = Actor(
         num_columns=18,

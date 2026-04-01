@@ -8,8 +8,8 @@ from eigen3.environment.trading_env import TradingEnv, TradingEnvState, EnvState
 
 
 def _obs_num_features(env: TradingEnv) -> int:
-    """Last dimension of observations (market + optional portfolio tail)."""
-    return env.num_market_features + env.portfolio_obs_dim
+    """Last dimension of observations (market-only; portfolio stored separately)."""
+    return env.num_market_features
 
 
 def create_test_data(num_days=1000, num_columns=669):

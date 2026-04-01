@@ -69,18 +69,25 @@ def _replay_to_checkpoint(buf: ReplayBufferState) -> dict[str, Any]:
         "rewards": np.asarray(jax.device_get(buf.rewards)),
         "next_obs": np.asarray(jax.device_get(buf.next_obs)),
         "dones": np.asarray(jax.device_get(buf.dones)),
+        "port_obs": np.asarray(jax.device_get(buf.port_obs)),
+        "next_port_obs": np.asarray(jax.device_get(buf.next_port_obs)),
         "size": np.asarray(jax.device_get(buf.size)),
         "insert_idx": np.asarray(jax.device_get(buf.insert_idx)),
     }
 
 
 def _replay_from_checkpoint(d: Mapping[str, Any]) -> ReplayBufferState:
+    capacity = d["obs"].shape[0]
+    port = d.get("port_obs", np.zeros((capacity, 0), dtype=np.float32))
+    next_port = d.get("next_port_obs", np.zeros((capacity, 0), dtype=np.float32))
     return ReplayBufferState(
         obs=jnp.asarray(d["obs"]),
         actions=jnp.asarray(d["actions"]),
         rewards=jnp.asarray(d["rewards"]),
         next_obs=jnp.asarray(d["next_obs"]),
         dones=jnp.asarray(d["dones"]),
+        port_obs=jnp.asarray(port),
+        next_port_obs=jnp.asarray(next_port),
         size=jnp.asarray(d["size"]),
         insert_idx=jnp.asarray(d["insert_idx"]),
     )
@@ -116,6 +123,7 @@ def _env_states_to_checkpoint(es: EnvState) -> dict[str, Any]:
         "obs": np.asarray(jax.device_get(es.obs)),
         "reward": np.asarray(jax.device_get(es.reward)),
         "done": np.asarray(jax.device_get(es.done)),
+        "portfolio_obs": np.asarray(jax.device_get(es.portfolio_obs)),
         "env_state": {
             "current_step": np.asarray(jax.device_get(s.current_step)),
             "start_step": np.asarray(jax.device_get(s.start_step)),
@@ -139,11 +147,13 @@ def _env_states_to_checkpoint(es: EnvState) -> dict[str, Any]:
 
 
 def _env_states_from_checkpoint(d: Mapping[str, Any]) -> EnvState:
+    port = d.get("portfolio_obs", np.zeros(0, dtype=np.float32))
     return EnvState(
         env_state=_trading_env_state_from_checkpoint(d["env_state"]),
         obs=jnp.asarray(d["obs"]),
         reward=jnp.asarray(d["reward"]),
         done=jnp.asarray(d["done"]),
+        portfolio_obs=jnp.asarray(port),
         info={},
     )
 
@@ -152,10 +162,12 @@ def fresh_replay_buffer_for_workflow(workflow: TradingERLWorkflow) -> ReplayBuff
     """Empty replay buffer matching *workflow* env shapes and configured capacity."""
     obs_shape = tuple(int(x) for x in workflow.env.obs_space.shape)
     action_shape = tuple(int(x) for x in workflow.env.action_space.shape)
+    pdim = getattr(workflow.env, "portfolio_obs_dim", 0)
     return create_replay_buffer(
         int(workflow.config.replay_buffer_size),
         obs_shape,
         action_shape,
+        portfolio_obs_dim=pdim,
     )
 
 
