@@ -5,7 +5,11 @@ import sys
 from pathlib import Path
 
 # Must be set before JAX is first imported (the eigen3 import below triggers it).
-os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.95")
+# Force-set: some container images pre-set a lower value; override with
+# EIGEN3_XLA_MEM_FRACTION env var if you need a different fraction.
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = os.environ.get(
+    "EIGEN3_XLA_MEM_FRACTION", "0.95"
+)
 
 # Repo root on path: script dir is ``scripts/``, not the package parent.
 _REPO_ROOT = Path(__file__).resolve().parent.parent

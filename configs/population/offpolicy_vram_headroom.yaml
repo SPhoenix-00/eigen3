@@ -7,32 +7,33 @@
 # Rationale (steps 1–5):
 #   1) local_batch_size — lower gradient noise per step (fits in freed buffer VRAM).
 #   2) gradient_steps_per_gen — more SGD per gen; almost no extra static VRAM.
-#   3) local_training_agent_batch_size — wider loss vmap (fewer chunks); raises
-#      *peak* during training — stepped 8→16, not full pop, to stay safe.
+#   3) local_training_agent_batch_size — loss vmap chunk width; stepped back to 8
+#      from 12 after portfolio features raised per-chunk peak to ~39 GiB.
 #   4) steps_per_agent — more fresh transitions per generation vs replay reuse.
 #   5) local_replay_buffer_size — split storage ~22 KB/transition; 700K ≈ 15 GiB.
 #
 # First vmapped loss kernel peaks hard: 128×16 ~70GiB OOM; 112×14 ~53GiB alloc OOM;
-# 96×12 observed ~61/80GiB steady. Do not raise batch+chunk together without profiling.
-# To experiment: try 104×12 or 96×14 one knob at a time.
+# 96×12 observed ~39GiB alloc (OOM after gen 1 with portfolio features).
+# 96×8 is safe (~26 GiB peak). To experiment: try 96×10 one knob at a time.
 # ============================================================================
 
 defaults:
   - default
 
-# (1) Stable on 80GiB with chunk 12; 112 pushed first-loss OOM.
+# (1) Stable on 80GiB with chunk 8; batch 112 pushed first-loss OOM at chunk 12.
 local_batch_size: 96
 
 # (2) Was 24. Pure extra work per gen; no larger replay tensor.
 gradient_steps_per_gen: 32
 
-# (3) 12-wide vmap: 4 chunks for pop 48 (12+12+12+12).
-local_training_agent_batch_size: 12
+# (3) 8-wide vmap: 6 chunks for pop 48.  Was 12 pre-portfolio, but the
+#     combined obs (33 features) raises per-chunk peak to ~39 GiB at 12;
+#     8 keeps peak ~26 GiB which is safe across generations.
+local_training_agent_batch_size: 8
 
 # (4) Was 320. ~20% more on-policy data per gen before the same gradient block.
 steps_per_agent: 384
 
 # (5) Split storage: ~22 KB/transition. 700K ≈ 14.7 GiB.
-#     96×12 loss peak ~39 GiB; with MEM_FRACTION=0.95 → 76 GiB budget,
-#     leaving ~17 GiB headroom.  1M was too tight (60 GiB default limit).
+#     96×8 loss peak ~26 GiB + buffer ~15 GiB → ~41/76 GiB with MEM_FRACTION=0.95.
 local_replay_buffer_size: 700000
