@@ -1,7 +1,11 @@
 """Training script for Eigen3 trading system (Hydra entry point)."""
 
+import os
 import sys
 from pathlib import Path
+
+# Must be set before JAX is first imported (the eigen3 import below triggers it).
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.95")
 
 # Repo root on path: script dir is ``scripts/``, not the package parent.
 _REPO_ROOT = Path(__file__).resolve().parent.parent

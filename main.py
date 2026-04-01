@@ -39,6 +39,10 @@ def _parse_cli(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
 
 
 def _set_compat_env(stamp: str, verbose: bool, quiet: bool) -> Path:
+    # JAX defaults to 75% of GPU VRAM; on 80 GiB that leaves only 60 GiB for
+    # XLA which is too tight once the replay buffer + vmapped loss are in play.
+    os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.95")
+
     # Suppress low-level backend compiler spam in default user-facing runs.
     # Keep raw backend logs available in verbose mode for debugging.
     if not verbose:

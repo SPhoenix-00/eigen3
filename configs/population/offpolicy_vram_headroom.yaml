@@ -10,8 +10,7 @@
 #   3) local_training_agent_batch_size — wider loss vmap (fewer chunks); raises
 #      *peak* during training — stepped 8→16, not full pop, to stay safe.
 #   4) steps_per_agent — more fresh transitions per generation vs replay reuse.
-#   5) local_replay_buffer_size — with compact split storage (market obs + portfolio
-#      vector stored separately), 1M transitions ≈ 20 GiB; leaves ~25 GiB for loss peak.
+#   5) local_replay_buffer_size — split storage ~22 KB/transition; 700K ≈ 15 GiB.
 #
 # First vmapped loss kernel peaks hard: 128×16 ~70GiB OOM; 112×14 ~53GiB alloc OOM;
 # 96×12 observed ~61/80GiB steady. Do not raise batch+chunk together without profiling.
@@ -33,5 +32,7 @@ local_training_agent_batch_size: 12
 # (4) Was 320. ~20% more on-policy data per gen before the same gradient block.
 steps_per_agent: 384
 
-# (5) Split storage: ~21 KB/transition. 1M ≈ 20 GiB; with 96×12 loss peak ~55 GiB → ~75/80 GiB.
-local_replay_buffer_size: 1000000
+# (5) Split storage: ~22 KB/transition. 700K ≈ 14.7 GiB.
+#     96×12 loss peak ~39 GiB; with MEM_FRACTION=0.95 → 76 GiB budget,
+#     leaving ~17 GiB headroom.  1M was too tight (60 GiB default limit).
+local_replay_buffer_size: 700000
