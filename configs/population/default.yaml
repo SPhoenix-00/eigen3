@@ -54,8 +54,9 @@ champion_injection: true              # Also inject all-time best validation age
 
 # ---------- Replay Buffer ----------
 replay_buffer_size: 1500000           # Eigen2 BUFFER_SIZE (multi-GPU / pmap)
-# Single-GPU: smaller cap → ring buffer turns over in ~20–30 gens at 48×320 transitions/gen (fresher off-policy data).
-local_replay_buffer_size: 320000      # ~9 GiB float32 obs+next_obs at 151×18×1; tune with nvidia-smi
+# Single-GPU: obs stored as market-only (151×18×F) + compact portfolio vector (P);
+# ~21 KB/transition at F=1, P=32 → 1.2M ≈ 24 GiB. Tune with nvidia-smi.
+local_replay_buffer_size: 1200000
 min_buffer_size: 23200                # Eigen2 MIN_BUFFER_SIZE — start training after this many transitions
 local_min_buffer_size: 15000          # ~one generation of data at pop 48 × steps_per_agent 320 before DDPG updates
 min_buffer_size_sweep: 5000           # Eigen2 MIN_BUFFER_SIZE_SWEEP (faster DDPG for sweeps)
