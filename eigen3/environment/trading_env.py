@@ -426,22 +426,22 @@ class TradingEnv(Env):
             (1, self.num_investable_stocks),
         ).squeeze(0)
 
-        # 2. Benchmark Daily PnL (1 share of every valid stock)
-        valid = jnp.isfinite(curr_prices) & jnp.isfinite(next_prices) & (curr_prices > 0)
-        benchmark_daily_pnl = jnp.sum(jnp.where(valid, next_prices - curr_prices, 0.0))
-
-        # 3. Agent Daily PnL
-        # Active positions: is_active > 0.5
+        # 2. Agent Daily PnL
         active_mask = (positions[:, 5] > 0.5)
         stock_indices = positions[:, 0].astype(jnp.int32)
         coefficients = positions[:, 4]
         scaled_coefs = jnp.power(coefficients, self.conviction_scaling_power)
-        
-        # We assume 1 nominal share per position, scaled by coefficient
+
         pos_diffs = next_prices[stock_indices] - curr_prices[stock_indices]
         agent_daily_pnl = jnp.sum(jnp.where(active_mask, scaled_coefs * pos_diffs, 0.0))
 
-        # 4. Daily Alpha Calculation
+        # 3. Benchmark Daily PnL — capital-matched to agent exposure
+        valid = jnp.isfinite(curr_prices) & jnp.isfinite(next_prices) & (curr_prices > 0)
+        agent_exposure = jnp.sum(jnp.where(active_mask, scaled_coefs, 0.0))
+        per_stock_change = jnp.sum(jnp.where(valid, next_prices - curr_prices, 0.0))
+        benchmark_daily_pnl = agent_exposure * per_stock_change
+
+        # 4. Daily Alpha = timing skill only (leverage cancels out)
         daily_alpha = agent_daily_pnl - benchmark_daily_pnl
         
         # Apply loss penalty
