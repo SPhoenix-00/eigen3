@@ -337,7 +337,7 @@ class TradingWorkflowConfig:
     steps_per_agent: int = 100
     gradient_vmap_chunk_size: Optional[int] = None
     forced_exploration_buffer_pct: float = 0.9  # Do forced exploration until buffer is this % full
-    bnh_penalty_warmup_gens: int = 5  # Gradually introduce BnH penalty over these generations after forced exploration ends
+    bnh_penalty_warmup_gens: int = 15  # Transition length: coeff boost decays over N gens, then loss penalty ramps over another N gens (2N total)
 
 
 # ---------------------------------------------------------------------------
@@ -407,20 +407,21 @@ class TradingERLWorkflow:
         val_env = self.val_env
         agent = self.agent
 
-        def _compute_action_one(params, obs, port_obs, key, force_explore):
+        def _compute_action_one(params, obs, port_obs, key, coeff_boost_scale):
             combined = combine_market_portfolio(obs, port_obs)
             state = AgentState(params=params)
             actions, _ = agent.compute_actions(state, SampleBatch(obs=combined[None]), key)
             act = actions[0]
 
-            def override_fn():
-                rand_coeff = jax.random.uniform(key, (act.shape[0],), minval=1.1, maxval=3.0)
-                return act.at[:, 0].set(rand_coeff)
+            def boost_fn():
+                rand_boost = jax.random.uniform(key, (act.shape[0],), minval=1.0, maxval=2.0)
+                boosted_coeff = jnp.clip(act[:, 0] + coeff_boost_scale * rand_boost, 0.0, 100.0)
+                return act.at[:, 0].set(boosted_coeff)
 
             def normal_fn():
                 return act
 
-            return jax.lax.cond(force_explore, override_fn, normal_fn)
+            return jax.lax.cond(coeff_boost_scale > 0.0, boost_fn, normal_fn)
 
         def _eval_action_one(params, obs, port_obs, key):
             combined = combine_market_portfolio(obs, port_obs)
@@ -456,7 +457,7 @@ class TradingERLWorkflow:
             buf: ReplayBufferState,
             key: chex.PRNGKey,
             num_steps: chex.Array,
-            force_explore: chex.Array,
+            coeff_boost_scale: chex.Array,
             loss_penalty_multiplier: chex.Array,
             action_bonus: chex.Array,
         ):
@@ -470,7 +471,7 @@ class TradingERLWorkflow:
                 env_states, buf, key, total_reward = carry
                 key, step_key, reset_key = random.split(key, 3)
                 action_keys = random.split(step_key, pop_size_int)
-                all_actions = jax.vmap(lambda p, o, po, k: _compute_action_one(p, o, po, k, force_explore))(
+                all_actions = jax.vmap(lambda p, o, po, k: _compute_action_one(p, o, po, k, coeff_boost_scale))(
                     stacked_params, env_states.obs, env_states.portfolio_obs, action_keys,
                 )
                 
@@ -585,7 +586,7 @@ class TradingERLWorkflow:
         buf: ReplayBufferState,
         key: chex.PRNGKey,
         num_steps: int,
-        force_explore: bool,
+        coeff_boost_scale: float,
         loss_penalty_multiplier: float,
         action_bonus: float,
     ) -> Tuple[Any, ReplayBufferState, chex.PRNGKey, chex.Array]:
@@ -600,7 +601,7 @@ class TradingERLWorkflow:
             buf,
             key,
             jnp.asarray(int(num_steps), dtype=jnp.int32),
-            jnp.asarray(force_explore, dtype=jnp.bool_),
+            jnp.asarray(coeff_boost_scale, dtype=jnp.float32),
             jnp.asarray(loss_penalty_multiplier, dtype=jnp.float32),
             jnp.asarray(action_bonus, dtype=jnp.float32),
         )
@@ -1076,16 +1077,19 @@ class TradingERLWorkflow:
 
         # Default values from environment
         base_loss_multiplier = float(getattr(self.env, "loss_penalty_multiplier", 1.25))
+        warmup_gens = self.config.bnh_penalty_warmup_gens
 
         if is_forced_explore:
+            # Buffer filling: full coefficient boost, no loss penalty
+            coeff_boost_scale = 1.0
+            loss_penalty_multiplier = 0.0
             print(
-                f"  > Collect (forced exploration > 1.0; buffer {buffer_pct*100:.1f}%)...",
+                f"  > Collect (forced exploration +boost; buffer {buffer_pct*100:.1f}%)...",
                 end="",
                 flush=True,
             )
             self._forced_exploration_ended_gen = -1  # Reset if we somehow dip back
-            loss_penalty_multiplier = 0.0
-            
+
             # Action bonus for first half of forced exploration
             half_explore_pct = self.config.forced_exploration_buffer_pct / 2.0
             if buffer_pct < half_explore_pct:
@@ -1096,19 +1100,34 @@ class TradingERLWorkflow:
         else:
             if self._forced_exploration_ended_gen == -1:
                 self._forced_exploration_ended_gen = self.generation
-            
+
             gens_since_end = self.generation - self._forced_exploration_ended_gen
-            
-            if gens_since_end < self.config.bnh_penalty_warmup_gens:
-                warmup_progress = float(gens_since_end) / float(self.config.bnh_penalty_warmup_gens)
-                loss_penalty_multiplier = base_loss_multiplier * warmup_progress
-                print(f"  > Collect (warm-up penalties {warmup_progress:.2f}x)...", end="", flush=True)
+
+            if gens_since_end < warmup_gens:
+                # Phase A: coefficient boost decays linearly, no loss penalty yet
+                coeff_boost_scale = 1.0 - float(gens_since_end) / float(warmup_gens)
+                loss_penalty_multiplier = 0.0
+                print(
+                    f"  > Collect (coeff transition boost={coeff_boost_scale:.2f}x)...",
+                    end="", flush=True,
+                )
+            elif gens_since_end < 2 * warmup_gens:
+                # Phase B: no boost, loss penalty ramps linearly
+                coeff_boost_scale = 0.0
+                penalty_progress = float(gens_since_end - warmup_gens) / float(warmup_gens)
+                loss_penalty_multiplier = base_loss_multiplier * penalty_progress
+                print(
+                    f"  > Collect (penalty ramp {penalty_progress:.2f}x)...",
+                    end="", flush=True,
+                )
             else:
+                # Fully transitioned
+                coeff_boost_scale = 0.0
                 loss_penalty_multiplier = base_loss_multiplier
                 print("  > Collect...", end="", flush=True)
-                
+
             action_bonus = 0.0
-            
+
         t_collect_start = time.perf_counter()
         self.key, collect_key = random.split(self.key)
         self._env_states, self._replay_buffer, _, collect_reward = (
@@ -1118,7 +1137,7 @@ class TradingERLWorkflow:
                 self._replay_buffer,
                 collect_key,
                 self.config.steps_per_agent,
-                is_forced_explore,
+                coeff_boost_scale,
                 loss_penalty_multiplier,
                 action_bonus,
             )

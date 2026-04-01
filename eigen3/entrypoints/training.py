@@ -998,7 +998,7 @@ def build_trading_workflow_config(cfg: DictConfig) -> TradingWorkflowConfig:
             OmegaConf.select(cfg, "population.forced_exploration_buffer_pct", default=0.9)
         ),
         bnh_penalty_warmup_gens=int(
-            OmegaConf.select(cfg, "population.bnh_penalty_warmup_gens", default=5)
+            OmegaConf.select(cfg, "population.bnh_penalty_warmup_gens", default=15)
         ),
     )
 

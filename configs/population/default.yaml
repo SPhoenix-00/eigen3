@@ -86,10 +86,10 @@ skip_reevaluation_on_resume: true     # Skip re-eval on resume unless reward fun
 
 
 # ---------- Curriculum (trading workflow) ----------
-# Forced exploration: override actor coeffs > threshold until replay buffer is this full (0–1).
+# Forced exploration: additive coeff boost until replay buffer is this full (0–1).
 forced_exploration_buffer_pct: 0.9
-# After buffer fills, ramp loss penalty from 0 to full over this many generations.
-bnh_penalty_warmup_gens: 5
+# Transition length (N): coeff boost decays over N gens, then loss penalty ramps over another N gens (2N total).
+bnh_penalty_warmup_gens: 15
 
 
 # ---------- Training Cadence ----------
