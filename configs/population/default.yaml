@@ -136,7 +136,7 @@ gauntlet_num_slices: 20               # Eigen2 GAUNTLET_NUM_SLICES (vs 7 for nor
 
 # ---------- Full training state (RNG, population, replay, env states) ----------
 # Required for --resume / population.resume=true. Written every ``save_interval`` generations.
-save_training_state: true
+save_training_state: false
 
 # Resume: use ``python main.py --resume`` (optional path; default = last_run.json), or:
 #   python scripts/train.py population.resume=true population.resume_path=checkpoints/<run>
