@@ -708,7 +708,7 @@ def _print_generation_summary(
             print(
                 f"  {rank}. Agent {idx:2d}: Fitness={fitness:8.2f}, "
                 f"Val={r_mean:7.2f}, ROI={roi:6.2f}%, "
-                f"PnL=${pnl:8.2f} ({bh_excess:+.2f}), WR={wr_str}"
+                f"PnL=${pnl:8.2f} (vs B&H {bh_excess:+.2f}), WR={wr_str}"
             )
     else:
         print("  (No Top 5 stats available)")

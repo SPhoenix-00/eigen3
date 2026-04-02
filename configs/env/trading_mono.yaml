@@ -24,9 +24,11 @@ min_sale_target: 10.0
 max_sale_target: 50.0
 hurdle_rate: 0.005
 conviction_scaling_power: 1.0
-loss_penalty_multiplier: 1.25
+# 1.0 = symmetric daily alpha and terminal BNH terms (no extra weight on losses).
+loss_penalty_multiplier: 1.0
 episode_reward_multiplier: 1.0
-bnh_episode_misalignment_multiplier: 2.0
+# 1.0 = no extra scale when agent PnL disagrees with market direction.
+bnh_episode_misalignment_multiplier: 1.0
 observation_noise_std: 0.01
 
 # Mono file load (see eigen3.data.load_mono_table)

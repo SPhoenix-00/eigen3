@@ -697,8 +697,10 @@ class TradingERLWorkflow:
             ``100 * sum(episode total_pnl) / max(episode peak_capital_employed)``
             per agent (0 if max peak is 0).  Buy-hold excess and PnL entries
             are means over validation episodes (captured at first ``done`` per
-            episode).  Mean/min episode reward are taken over validation
-            episodes (not the bottom-k fitness slice).
+            episode).  ``mean_bh_excess_usd`` is terminal PnL vs equal-weight
+            buy-and-hold when the env implements ``episode_terminal_bnh_excess_usd``
+            (otherwise cumulative daily alpha).  Mean/min episode reward are taken
+            over validation episodes (not the bottom-k fitness slice).
         """
         pop_size = self._pop_size
         # At least one validation episode (0 would make jnp.stack fail).
@@ -726,12 +728,20 @@ class TradingERLWorkflow:
         all_ep_days_without_pos: list[chex.Array] = []
         all_ep_steps: list[chex.Array] = []
         all_ep_max_coeff: list[chex.Array] = []
+        all_ep_alpha: list[chex.Array] = []
 
-        vmap_excess = None
+        vmap_terminal_bnh = None
+        if hasattr(self.val_env, "episode_terminal_bnh_excess_usd"):
+            vmap_terminal_bnh = jax.vmap(self.val_env.episode_terminal_bnh_excess_usd)
+        vmap_alpha_sum = None
         if hasattr(self.val_env, "episode_alpha_sum_usd"):
-            vmap_excess = jax.vmap(self.val_env.episode_alpha_sum_usd)
-        elif hasattr(self.val_env, "episode_buyhold_excess_usd"):
-            vmap_excess = jax.vmap(self.val_env.episode_buyhold_excess_usd)
+            vmap_alpha_sum = jax.vmap(self.val_env.episode_alpha_sum_usd)
+        vmap_bh_legacy = None
+        if vmap_terminal_bnh is None:
+            if hasattr(self.val_env, "episode_alpha_sum_usd"):
+                vmap_bh_legacy = jax.vmap(self.val_env.episode_alpha_sum_usd)
+            elif hasattr(self.val_env, "episode_buyhold_excess_usd"):
+                vmap_bh_legacy = jax.vmap(self.val_env.episode_buyhold_excess_usd)
 
         if loss_penalty_multiplier is None:
             loss_penalty_multiplier = getattr(self.val_env, "loss_penalty_multiplier", 1.25)
@@ -755,6 +765,7 @@ class TradingERLWorkflow:
             ep_rewards = jnp.zeros(pop_size)
             done_mask = jnp.zeros(pop_size, dtype=jnp.bool_)
             ep_excess = jnp.zeros(pop_size)
+            ep_alpha = jnp.zeros(pop_size)
             ep_gain = jnp.zeros(pop_size)
             ep_pnl = jnp.zeros(pop_size)
             ep_num_trades = jnp.zeros(pop_size, dtype=jnp.int32)
@@ -786,9 +797,26 @@ class TradingERLWorkflow:
                     done_mask, 0.0, next_states.reward,
                 )
                 newly_done = next_states.done & ~done_mask
-                if vmap_excess is not None:
-                    ex = vmap_excess(next_states)
-                    ep_excess = jnp.where(newly_done, ex, ep_excess)
+                if vmap_terminal_bnh is not None:
+                    ep_excess = jnp.where(
+                        newly_done,
+                        vmap_terminal_bnh(next_states),
+                        ep_excess,
+                    )
+                elif vmap_bh_legacy is not None:
+                    ep_excess = jnp.where(
+                        newly_done,
+                        vmap_bh_legacy(next_states),
+                        ep_excess,
+                    )
+                if vmap_alpha_sum is not None:
+                    ep_alpha = jnp.where(
+                        newly_done,
+                        vmap_alpha_sum(next_states),
+                        ep_alpha,
+                    )
+                else:
+                    ep_alpha = jnp.where(newly_done, ep_excess, ep_alpha)
                 ep_gain = jnp.where(
                     newly_done,
                     next_states.env_state.total_gain_pct,
@@ -808,6 +836,7 @@ class TradingERLWorkflow:
 
             all_ep_rewards.append(ep_rewards)
             all_ep_excess.append(ep_excess)
+            all_ep_alpha.append(ep_alpha)
             all_ep_gain.append(ep_gain)
             all_ep_pnl.append(ep_pnl)
             all_ep_num_trades.append(ep_num_trades)
@@ -821,6 +850,7 @@ class TradingERLWorkflow:
 
         rewards_matrix = jnp.stack(all_ep_rewards, axis=0)  # [n_episodes, pop_size]
         excess_matrix = jnp.stack(all_ep_excess, axis=0)
+        alpha_matrix = jnp.stack(all_ep_alpha, axis=0)
         gain_matrix = jnp.stack(all_ep_gain, axis=0)
 
         # k=0 would mean over an empty slice (NaNs); treat non-positive as 1.
@@ -849,6 +879,7 @@ class TradingERLWorkflow:
         per_episode: Dict[str, chex.Array] = {
             "rewards": rewards_matrix,
             "excess": excess_matrix,
+            "alpha_sum": alpha_matrix,
             "gain_pct": gain_matrix,
             "pnl": pnl_matrix,
             "num_trades": jnp.stack(all_ep_num_trades, axis=0),
@@ -889,7 +920,9 @@ class TradingERLWorkflow:
             max_steps = 10_000 + _slack
 
         vmap_excess = None
-        if hasattr(target_env, "episode_alpha_sum_usd"):
+        if hasattr(target_env, "episode_terminal_bnh_excess_usd"):
+            vmap_excess = jax.vmap(target_env.episode_terminal_bnh_excess_usd)
+        elif hasattr(target_env, "episode_alpha_sum_usd"):
             vmap_excess = jax.vmap(target_env.episode_alpha_sum_usd)
         elif hasattr(target_env, "episode_buyhold_excess_usd"):
             vmap_excess = jax.vmap(target_env.episode_buyhold_excess_usd)
@@ -934,7 +967,12 @@ class TradingERLWorkflow:
         stacked_params: TradingNetworkParams,
         key: chex.PRNGKey,
     ) -> Dict[str, Any]:
-        """HoF gauntlet: shared validation episode + holdout episode; raw alpha sum each.
+        """HoF gauntlet: shared validation episode + holdout episode.
+
+        Excess is terminal PnL vs buy-and-hold when ``episode_terminal_bnh_excess_usd``
+        exists; otherwise cumulative daily alpha. Keys ``val_alpha_sum_usd`` /
+        ``hold_alpha_sum_usd`` keep legacy names but carry the same scalar as
+        ``val_bn_excess`` / ``hold_bn_excess``.
 
         Requires ``holdout_env`` and holdout vmapped fns. Returns host-ready dict
         (NumPy) including ``val_reset_key_uint32`` for reproducibility.
@@ -1189,6 +1227,8 @@ class TradingERLWorkflow:
         t_stats_start = time.perf_counter()
         fit_np = np.asarray(jax.device_get(fitness_scores))
         bh_np = np.asarray(jax.device_get(bh_excess))
+        alpha_mean = jnp.mean(per_episode["alpha_sum"], axis=0)
+        alpha_np = np.asarray(jax.device_get(alpha_mean))
         roi_np = np.asarray(jax.device_get(val_roi_pct))
         pnl_np = np.asarray(jax.device_get(pnl_mean_arr))
         rew_mean_np = np.asarray(jax.device_get(reward_mean_arr))
@@ -1310,7 +1350,7 @@ class TradingERLWorkflow:
             "top5_roi_pct": [float(roi_np[i]) for i in top5_indices],
             "top5_pnl": [float(pnl_np[i]) for i in top5_indices],
             "top5_bh_excess_usd": [float(bh_np[i]) for i in top5_indices],
-            "top5_alpha_sum_usd": [float(bh_np[i]) for i in top5_indices],
+            "top5_alpha_sum_usd": [float(alpha_np[i]) for i in top5_indices],
             "top5_win_rate": [float(win_rate_np[i]) for i in top5_indices],
             "best_agent_val_episodes": best_episodes,
             "timing_init_s": float(t_init_s),

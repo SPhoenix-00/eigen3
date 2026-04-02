@@ -50,8 +50,8 @@ class TradingEnvState(PyTreeData):
     # Episode-level value-add tracking
     peak_capital_employed: chex.Array  # scalar float – max sum of entry prices across steps
     total_pnl: chex.Array  # scalar float – cumulative raw dollar PnL (exit − entry)
-    # Episode-level aggregate of unscaled daily alpha (agent daily PnL - benchmark daily PnL).
-    episode_alpha_sum: chex.Array  # scalar float; cumulative across steps
+    # Running episode B&H excess: total_pnl minus peak-capital-scaled equal-weight hold.
+    episode_alpha_sum: chex.Array  # scalar float; updated each step to current B&H excess
 
     # Dynamic multipliers for curriculum learning
     loss_penalty_multiplier: chex.Array = pytree_field(default_factory=lambda: jnp.array(1.25, dtype=jnp.float32))
@@ -410,55 +410,37 @@ class TradingEnv(Env):
         days_with = env_state.days_with_positions + jax.lax.select(has_positions_now, 1, 0)
         days_without = env_state.days_without_positions + jax.lax.select(~has_positions_now, 1, 0)
 
-        # --- Calculate Daily Alpha Reward ---
-        # 1. Get prices for current step and next step (to measure the return of holding the portfolio for 1 day)
+        # --- Per-step reward: incremental B&H excess ---
+        # Compute the running episode B&H excess *now* and subtract last step's value
+        # to get a dense per-step signal.  Unlike per-step "daily alpha" (which is
+        # identically zero in mono because agent and benchmark hold the same single
+        # stock), this measures: "how much did total_pnl vs peak-capital-scaled
+        # buy-and-hold change THIS step?" — non-zero whenever the agent opens,
+        # closes, or the market moves relative to the agent's realised PnL.
+
         new_step = env_state.current_step + 1
-        safe_next_step = jnp.minimum(new_step, self.data_array_full.shape[0] - 1)
-        
-        curr_prices = jax.lax.dynamic_slice(
-            self.data_array_full[:, :, 1],
-            (env_state.current_step, self.investable_start_col),
-            (1, self.num_investable_stocks),
-        ).squeeze(0)
-        next_prices = jax.lax.dynamic_slice(
-            self.data_array_full[:, :, 1],
-            (safe_next_step, self.investable_start_col),
-            (1, self.num_investable_stocks),
-        ).squeeze(0)
+        done = new_step >= env_state.end_step
 
-        # 2. Agent Daily PnL
-        active_mask = (positions[:, 5] > 0.5)
-        stock_indices = positions[:, 0].astype(jnp.int32)
-        coefficients = positions[:, 4]
-        scaled_coefs = jnp.power(coefficients, self.conviction_scaling_power)
+        # end_row = new_step: use the data row we've advanced to so the
+        # benchmark reflects the same one-day mark-to-market as the agent.
+        end_row = jnp.clip(new_step, 0, self.data_array_full.shape[0] - 1)
+        bnh_excess_now, avg_ret = self._episode_bnh_excess_and_avg_return(
+            env_state.start_step, end_row, new_total_pnl, new_peak
+        )
 
-        pos_diffs = next_prices[stock_indices] - curr_prices[stock_indices]
-        agent_daily_pnl = jnp.sum(jnp.where(active_mask, scaled_coefs * pos_diffs, 0.0))
+        daily_alpha = bnh_excess_now - env_state.episode_alpha_sum
 
-        # 3. Benchmark Daily PnL — capital-matched to agent exposure
-        valid = jnp.isfinite(curr_prices) & jnp.isfinite(next_prices) & (curr_prices > 0)
-        agent_exposure = jnp.sum(jnp.where(active_mask, scaled_coefs, 0.0))
-        per_stock_change = jnp.sum(jnp.where(valid, next_prices - curr_prices, 0.0))
-        benchmark_daily_pnl = agent_exposure * per_stock_change
-
-        # 4. Daily Alpha = timing skill only (leverage cancels out)
-        daily_alpha = agent_daily_pnl - benchmark_daily_pnl
-        
-        # Apply loss penalty
+        # Apply loss penalty on negative increments
         daily_alpha = jnp.where(
             daily_alpha >= 0,
             daily_alpha,
-            daily_alpha * env_state.loss_penalty_multiplier
+            daily_alpha * env_state.loss_penalty_multiplier,
         )
 
         step_reward = daily_alpha * self.episode_reward_multiplier
 
-        # 5. Terminal episode shaping: full-window BNH excess (+ misalignment multiplier).
-        done = new_step >= env_state.end_step
-        end_row = jnp.clip(new_step - 1, 0, self.data_array_full.shape[0] - 1)
-        excess, avg_ret = self._episode_bnh_excess_and_avg_return(
-            env_state.start_step, end_row, new_total_pnl, new_peak
-        )
+        # Terminal episode shaping: add the full-window excess (minus what was
+        # already distributed as incremental rewards) with misalignment scaling.
         misalign = ((new_total_pnl <= 0) & (avg_ret > 0)) | ((new_total_pnl > 0) & (avg_ret < 0))
         mult = jnp.where(
             misalign,
@@ -466,9 +448,9 @@ class TradingEnv(Env):
             jnp.asarray(1.0, dtype=jnp.float32),
         )
         term_raw = (
-            excess
+            bnh_excess_now
             * jnp.asarray(self.episode_reward_multiplier, dtype=jnp.float32)
-            * mult
+            * (mult - 1.0)
         )
         term_shaped = jnp.where(
             term_raw >= 0,
@@ -477,8 +459,7 @@ class TradingEnv(Env):
         )
         step_reward = step_reward + jnp.where(done, term_shaped, 0.0)
 
-        # Persist for metrics / HoF: accumulate daily alpha over the episode
-        new_alpha_sum = env_state.episode_alpha_sum + daily_alpha
+        new_alpha_sum = bnh_excess_now
 
         # Split RNG for next step observation noise
         step_key, next_key = jax.random.split(env_state.rng_key)
@@ -610,12 +591,22 @@ class TradingEnv(Env):
         total_pnl: chex.Array,
         peak_capital: chex.Array,
     ) -> Tuple[chex.Array, chex.Array]:
-        """Episode-wide agent PnL minus buy-and-hold benchmark, and equal-weight avg return.
+        """Agent episode PnL minus episode buy-and-hold, and equal-weight average return.
 
-        When the agent deployed capital, the benchmark is peak capital employed
-        times the equal-weight average return from episode start to ``end_row``.
-        When peak capital is zero (idle episode), coefficient 1 means one share per
-        investable name at start prices: benchmark dollar PnL is sum of ``end - start``.
+        **Episode B&H** (when ``peak_capital > 0``): deploy the same **peak capital
+        employed** over the window as a passive equal-weight portfolio from
+        ``start_step`` prices to ``end_row`` prices—i.e. ``peak_capital * avg_return``
+        where ``avg_return`` is the mean simple return across valid investable names.
+        That dollar PnL is generally **non-zero** whenever the market moves; the
+        **excess** ``total_pnl - benchmark_pnl`` is zero only if the agent’s realized
+        outcome happens to match that scaled hold (not by construction).
+
+        When ``peak_capital == 0`` (idle episode), benchmark is one unit per name at
+        start prices: dollar PnL is ``sum(end - start)`` over valid names.
+
+        This is **not** the same object as per-step “daily alpha” in :meth:`step`
+        (capital-matched *daily* residual), whose sum can behave differently—e.g. near
+        zero in mono when timing does not separate from a constant hold.
         """
         start_prices = jax.lax.dynamic_slice(
             self.data_array_full[:, :, 1],
@@ -646,14 +637,34 @@ class TradingEnv(Env):
         return excess, avg_return
 
     def episode_alpha_sum_usd(self, state: EnvState) -> jnp.ndarray:
-        """Episode-wide sum of unscaled daily alpha in dollar units."""
+        """Running episode B&H excess in USD (= total_pnl - benchmark_pnl).
+
+        ``episode_alpha_sum`` now tracks the running B&H excess at each step
+        (updated in :meth:`step`).  At ``done``, equals the full-window terminal
+        B&H excess from :meth:`_episode_bnh_excess_and_avg_return`.
+        """
         return state.env_state.episode_alpha_sum
 
-    def episode_buyhold_excess_usd(self, state: EnvState) -> jnp.ndarray:
-        """Compatibility alias for older callers.
+    def episode_terminal_bnh_excess_usd(self, state: EnvState) -> jnp.ndarray:
+        """``total_pnl`` minus episode B&H in USD (peak-capital-scaled passive hold).
 
-        Returns the same scalar as :meth:`episode_alpha_sum_usd`.
+        Recomputes the excess from state fields so it is accurate at any step,
+        but meaningful mainly at ``done``.  Equivalent to
+        :meth:`episode_alpha_sum_usd` when read on the terminal transition.
         """
+        es = state.env_state
+        n = self.data_array_full.shape[0]
+        end_row = jnp.clip(es.current_step - 1, 0, n - 1)
+        excess, _ = self._episode_bnh_excess_and_avg_return(
+            es.start_step,
+            end_row,
+            es.total_pnl,
+            es.peak_capital_employed,
+        )
+        return excess
+
+    def episode_buyhold_excess_usd(self, state: EnvState) -> jnp.ndarray:
+        """Alias for :meth:`episode_alpha_sum_usd`."""
         return self.episode_alpha_sum_usd(state)
 
     def _update_positions(
