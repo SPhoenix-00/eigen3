@@ -100,7 +100,7 @@ bnh_penalty_warmup_gens: 0
 steps_per_agent: 320
 total_generations: 500                # Eigen2 NUM_GENERATIONS (gauntlet may stop earlier)
 max_generations_gauntlet: 500         # Eigen2 MAX_GENERATIONS_GAUNTLET — hard ceiling
-save_interval: 1                      # Eigen2 SAVE_FREQUENCY (1 = every gen for safety)
+save_interval: 25                     # Eigen2 SAVE_FREQUENCY (every N gens; 1 is safe but slow due to ~15GB buffer serialize)
 log_interval: 1                       # Eigen2 LOG_FREQUENCY
 
 
